@@ -45,11 +45,11 @@ function serve(lang, sync, imported) {
 }
 
 const words = {
-  en: { sync: "Your synced settings use Claude, Cursor, which isn't signed in on this computer. Sync carries settings, not sign-ins", backup: "This backup's settings use Claude, Cursor, which isn't signed in on this computer. A backup carries settings, not sign-ins", added: "Plugins added: ", failed: "Couldn't add the plugin github:x/y: " },
-  zh: { sync: "同步过来的设置用到了 Claude, Cursor，但本机尚未登录。同步只带设置", backup: "这份备份的设置用到了 Claude, Cursor，但本机尚未登录。备份只带设置", added: "已添加插件：", failed: "无法添加插件 github:x/y：" },
-  "zh-TW": { sync: "同步過來的設定用到了 Claude, Cursor，但本機尚未登入。同步只帶設定", backup: "這份備份的設定用到了 Claude, Cursor，但本機尚未登入。備份只帶設定", added: null, failed: null },
-  ja: { sync: "同期した設定は Claude, Cursor を使っていますが、このコンピュータではまだサインインしていません。", backup: "このバックアップの設定は Claude, Cursor を使っていますが、このコンピュータではまだサインインしていません。", added: "追加したプラグイン：", failed: "プラグイン github:x/y を追加できませんでした：" },
-  de: { sync: "Deine synchronisierten Einstellungen nutzen Claude, Cursor, auf diesem Computer aber nicht angemeldet.", backup: "Die Einstellungen dieser Sicherung nutzen Claude, Cursor, auf diesem Computer aber nicht angemeldet.", added: "Hinzugefügte Erweiterungen: ", failed: "Die Erweiterung github:x/y konnte nicht hinzugefügt werden: " },
+  en: { sync: "Your synced settings use Claude, Cursor, which isn't signed in on this computer. Sync carries a plugin's sign-in, not a subscription's", backup: "This backup's settings use Claude, Cursor, which isn't signed in on this computer. A backup carries a plugin's sign-in", added: "Plugins added: ", failed: "Couldn't add the plugin github:x/y: " },
+  zh: { sync: "同步过来的设置用到了 Claude, Cursor，但本机尚未登录。同步只带插件的登录", backup: "这份备份的设置用到了 Claude, Cursor，但本机尚未登录。备份只带插件的登录", added: "已添加插件：", failed: "无法添加插件 github:x/y：" },
+  "zh-TW": { sync: "同步過來的設定用到了 Claude, Cursor，但本機尚未登入。同步只帶外掛的登入", backup: "這份備份的設定用到了 Claude, Cursor，但本機尚未登入。備份只帶外掛的登入", added: null, failed: null },
+  ja: { sync: "同期した設定は Claude, Cursor を使っていますが、このコンピュータではまだサインインしていません。", backup: "このバックアップの設定は Claude, Cursor を使っていますが、このコンピュータではまだサインインしていません。バックアップに含まれるのはプラグインのサインインだけです", added: "追加したプラグイン：", failed: "プラグイン github:x/y を追加できませんでした：" },
+  de: { sync: "Deine synchronisierten Einstellungen nutzen Claude, Cursor, auf diesem Computer aber nicht angemeldet.", backup: "Die Einstellungen dieser Sicherung nutzen Claude, Cursor, auf diesem Computer aber nicht angemeldet. Eine Sicherung überträgt die Anmeldung von Erweiterungen, nicht die von Abos", added: "Hinzugefügte Erweiterungen: ", failed: "Die Erweiterung github:x/y konnte nicht hinzugefügt werden: " },
 };
 
 const base = { on: true, kind: "webdav", url: "https://dav.example.invalid/dav/", user: "me", passwordSet: true, passphraseSet: true, keys: true, agents: true, library: true, usage: true, last: new Date(Date.now() - 60000).toISOString() };

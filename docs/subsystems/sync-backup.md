@@ -20,6 +20,15 @@ clone a working tree or synchronize arbitrary files.
   sealing. Sync divides the setup into providers, settings, profiles, agents
   and library. Provider keys, agent models, library and usage have their own
   inclusion switches.
+- [`signins.go`](../../internal/plugin/signins.go) carries the plugins'
+  sign-ins (plugin-auth.json) in the providers part, by account key, unless
+  the bundle was collected without keys. A subscription's own sign-in
+  (logins.json, or an agent's credential file) is never carried. A sync
+  merge replaces them with a keyed uploader's accounts and keeps the
+  server's for one sent without keys (`Bundle.SignInsKeys`, written by a
+  whole collect as by `take`); a
+  restore adds them to the plugins it installed (`Restore`), through the
+  plugin host when one runs and in the file under its lock otherwise.
 - [`usage.go`](../../internal/davsync/usage.go) shares separately sealed usage
   and quota files through a remote's `files` interface.
 - [`restore.go`](../../internal/davsync/restore.go) replaces local parts from

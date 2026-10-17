@@ -2,9 +2,10 @@
 // with a passphrase, to carry to another machine: the providers (their keys
 // too, unless left out), the pictures picked for them, the settings, the
 // profiles, every agent's model and the library (the instructions, MCP
-// servers and skills magpie gives the agents). Subscriptions are not in it: each is
-// the sign-in of an agent on this machine, so each machine signs in on its
-// own.
+// servers and skills magpie gives the agents). A plugin's sign-in goes in it
+// too, unless the keys were left out (plugin.SignInsFor). A subscription is
+// not in it: it is the sign-in of an agent on this machine, so each machine
+// signs in on its own.
 //
 // The file is JSON: a header naming how it is sealed, and the bundle
 // encrypted with AES-256-GCM under a key derived from the passphrase with
@@ -86,14 +87,26 @@ type Bundle struct {
 	GroupOrder []string `json:"groupOrder,omitempty"`
 	// Plugins are the OpenCode plugins and middlewares added from npm or
 	// git (provider.Carried), installed where the backup is put back:
-	// the providers they serve come with them. Their sign-ins don't, as a
-	// subscription's don't. Nil from a magpie before them.
+	// the providers they serve come with them, and with the keys their
+	// sign-ins (SignIns). Nil from a magpie before them.
 	Plugins *[]plugin.Entry `json:"plugins,omitempty"`
 	// Sync can carry one part's credentials without changing the others'
 	// Keys policy; these are absent from older backups and whole collects.
 	ProvidersKeys *bool `json:"providersKeys,omitempty"`
 	SettingsKeys  *bool `json:"settingsKeys,omitempty"`
 	LibraryKeys   *bool `json:"libraryKeys,omitempty"`
+	// SignIns are the plugins' sign-ins (plugin-auth.json), by account key,
+	// so the computer a backup or a sync reaches is signed in to them too.
+	// A subscription's own sign-in is not one of these: it is the sign-in
+	// of an agent on one machine (see plugin.SignInsFor). Nil from a magpie
+	// before them, and from one collected without keys. Their scope is the
+	// providers': a sync merges them only where that part's credentials go.
+	SignIns map[string]json.RawMessage `json:"signIns,omitempty"`
+	// SignInsKeys is whether SignIns are the accounts' credentials, as the
+	// providers' marker is for their keys: a whole collect writes it (so one
+	// sent without keys keeps the server's sign-ins where it is merged), and
+	// so does every part a sync merges. Nil is a magpie before them.
+	SignInsKeys *bool `json:"signInsKeys,omitempty"`
 }
 
 type envelope struct {
@@ -200,6 +213,15 @@ func Collect(keys bool, app string) (Bundle, error) {
 	}
 	plugins := provider.Carried(keys)
 	b.Plugins = &plugins
+	// the plugins' sign-ins go with the plugins, unless the keys were left
+	// out: a sign-in is a credential as a provider's key is. The marker is
+	// written here too, as a sync's merge writes it: without one, an upload
+	// of this bundle would read as an older magpie's, and a sync would keep
+	// the server's sign-ins rather than take this computer's.
+	b.SignInsKeys = Flag(keys)
+	if keys {
+		b.SignIns = plugin.SignInsFor(plugins)
+	}
 	searches := []provider.SearchAPI{}
 	for _, a := range provider.StoredSearchAPIs() {
 		if !keys {
@@ -417,6 +439,15 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 		}
 		if b.Plugins != nil {
 			r.Plugins, r.PluginErrors = AddPlugins(*b.Plugins)
+		}
+		// after the plugins are in, so a sign-in is added to a plugin that
+		// is there; one that can't be is said in PluginErrors, not a failed
+		// restore
+		if err := plugin.KeepSignIns(context.WithoutCancel(context.Background()), b.SignIns); err != nil {
+			if r.PluginErrors == nil {
+				r.PluginErrors = map[string]string{}
+			}
+			r.PluginErrors["sign-ins"] = err.Error()
 		}
 		r.SignIn = provider.NotSignedIn(b.Providers)
 		stored, err := provider.Stored()

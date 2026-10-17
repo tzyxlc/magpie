@@ -121,8 +121,9 @@ func Mirror(ps []Provider, gs []Group) error {
 // or a git repository, on or off as the user left them, with their options:
 // without keys, those whose names look like a key are left out, as a
 // provider's secret headers are. A plugin added from a file or folder is
-// this computer's alone, and a plugin's sign-ins (plugin-auth.json) stay
-// here, as a subscription's do.
+// this computer's alone. A plugin's sign-ins (plugin-auth.json) go in the
+// bundle beside them, unless it was asked for without keys
+// (plugin.SignInsFor); a subscription's never do.
 func Carried(keys bool) []plugin.Entry {
 	var out []plugin.Entry
 	for _, e := range plugin.Load().Plugins {
@@ -208,6 +209,8 @@ func AddPlugins(ctx context.Context, es []plugin.Entry) (added []string, failed 
 // them: their model picks and settings alone) that no account here is
 // signed in to: they are listed once one is, and are to be signed in to on
 // this computer. A subscription the user removed from magpie is not one.
+// A plugin's sign-in that came with the backup or the sync (backup.Bundle's
+// SignIns, plugin.KeepSignIns) is made before this is asked, and counts.
 func NotSignedIn(ps []Provider) []string {
 	have := map[string]bool{}
 	for _, p := range All() {

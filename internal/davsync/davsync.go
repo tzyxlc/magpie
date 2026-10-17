@@ -807,6 +807,9 @@ func hashes(b backup.Bundle) map[string]string {
 	if b.Plugins != nil && len(*b.Plugins) > 0 { // as before them, without one
 		providers = append(providers, map[string][]plugin.Entry{"plugins": *b.Plugins})
 	}
+	if len(b.SignIns) > 0 { // as before them, without one
+		providers = append(providers, map[string]map[string]json.RawMessage{"signIns": b.SignIns})
+	}
 	return map[string]string{
 		"providers": h(providers),
 		"settings":  settingsHash,
@@ -876,6 +879,17 @@ func take(to *backup.Bundle, from backup.Bundle, part string) {
 		}
 		to.Providers, to.Icons, to.Groups, to.Searches, to.Order, to.GroupOrder = ps, from.Icons, from.Groups, searches, from.Order, from.GroupOrder
 		to.Plugins = from.Plugins
+		// the plugins' sign-ins follow the providers' credentials: a keyed
+		// uploader's accounts replace the server's, removals with them; one
+		// sent without keys leaves the server's, as it leaves providers'
+		// keys. A magpie before them sends no marker, and takes none away.
+		switch {
+		case from.SignInsKeys == nil: // older than them: the server's stay
+		case *from.SignInsKeys:
+			to.SignIns = from.SignIns
+		default:
+			to.SignIns = plugin.SignInsServed(to.SignIns, pluginEntries(from.Plugins))
+		}
 		to.ProvidersKeys = backup.Flag(keys || (to.ProvidersKeys != nil && *to.ProvidersKeys))
 		to.Keys = to.Keys || keys // the whole-bundle bit follows it, for a magpie that reads no per-part ones: it keeps the server's keys on its own upload then
 	case "settings":
@@ -917,7 +931,18 @@ func take(to *backup.Bundle, from backup.Bundle, part string) {
 		to.Library = lib
 		to.LibraryKeys = backup.Flag(keys || (to.LibraryKeys != nil && *to.LibraryKeys))
 	}
+	// the sign-ins go with the providers': their marker says whether the
+	// accounts' credentials came, for a reader that keeps them as they are
+	to.SignInsKeys = backup.Flag(to.ProvidersKeys != nil && *to.ProvidersKeys)
 	to.Version = backup.BundleVersion // the merged bundle is a sync one, whatever the server's file was
+}
+
+// pluginEntries is a bundle's plugins, nil when it has none.
+func pluginEntries(es *[]plugin.Entry) []plugin.Entry {
+	if es == nil {
+		return nil
+	}
+	return *es
 }
 
 // changed is when a part was last changed here, as its files say.
@@ -980,6 +1005,16 @@ func bring(b backup.Bundle, part string) error {
 				for spec, err := range failed {
 					log.Printf("sync: plugin %s: %s", spec, err)
 				}
+			}
+		}
+		// the plugins' sign-ins, after the plugins they belong to are in;
+		// one that can't be kept is said, not a failed sync
+		if len(b.SignIns) > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			err := plugin.KeepSignIns(ctx, b.SignIns)
+			cancel()
+			if err != nil {
+				log.Printf("sync: the plugins' sign-ins: %s", err)
 			}
 		}
 		if b.Searches == nil { // from a magpie before them: the ones here stay
