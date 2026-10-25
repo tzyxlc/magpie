@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -47,10 +48,25 @@ import (
 // which a strict upstream it is sent to later turns away (#2611): such a
 // fragment is given an id, and a later fragment's empty one is left out.
 //
+// And a choice that made calls and ended "stop" ends "tool_calls": told
+// it stopped, a client that reads finish_reason ends its turn there with
+// the calls not run (喜欢一个人 on Discord, a relay in front of
+// deepseek-v4.1-flash), as the translations' collector already has it.
+//
+// And Gemini's OpenAI-compatible API sends its tool calls with no "index"
+// (Linka's frames in gemini_compat_cut_test.go), where the contract has
+// one on every fragment. The AI SDK's OpenAI provider, which Cursor's
+// Private Inference reads Chat with, turns such a chunk away ("expected
+// number, received undefined" at tool_calls[0].index), and the call is
+// never made (#3386). A fragment with none is given its call's: a new id,
+// or a later place in its delta, is the next call.
+//
 // Lines pass whole, as they came, unless one has any of them.
 type chatTidy struct {
-	buf []byte
-	ids streamCallIDs
+	buf     []byte
+	ids     streamCallIDs
+	indexes streamCallIndexes
+	called  map[int]bool // the choices that made a call
 }
 
 var (
@@ -84,7 +100,7 @@ func (t *chatTidy) flush() []byte {
 }
 
 func (t *chatTidy) lines(b []byte) []byte {
-	if !needsTidy(b) {
+	if !t.needs(b) {
 		return append([]byte(nil), b...)
 	}
 	var out []byte
@@ -112,11 +128,18 @@ func needsTidy(line []byte) bool {
 		bytes.Contains(line, toolCallsField)
 }
 
+// needs is needsTidy, and a finish_reason once a choice made a call.
+func (t *chatTidy) needs(b []byte) bool {
+	return needsTidy(b) || len(t.called) > 0 && bytes.Contains(b, finishReasonField)
+}
+
+var finishReasonField = []byte(`"finish_reason"`)
+
 // tidyLine mends one line as the first of a stream.
 func tidyLine(line []byte) []byte { return (&chatTidy{}).line(line) }
 
 func (t *chatTidy) line(line []byte) []byte {
-	if !needsTidy(line) {
+	if !t.needs(line) {
 		return line
 	}
 	body := bytes.TrimRight(line, "\r\n")
@@ -139,6 +162,8 @@ func (t *chatTidy) line(line []byte) []byte {
 			c["finish_reason"] = json.RawMessage("null")
 			changed = true
 		}
+		choice := k
+		decodeJSON(c["index"], &choice)
 		var delta map[string]json.RawMessage
 		if decodeJSON(c["delta"], &delta) != nil {
 			continue
@@ -152,11 +177,20 @@ func (t *chatTidy) line(line []byte) []byte {
 			delete(delta, "tool_calls")
 			inDelta = true
 		} else if ok {
+			if t.indexes == nil {
+				t.indexes = streamCallIndexes{}
+			}
+			if given, chg := t.indexes.give(choice, calls); chg {
+				calls, delta["tool_calls"] = given, given
+				inDelta = true
+			}
 			if t.ids == nil {
 				t.ids = streamCallIDs{}
 			}
-			choice := k
-			decodeJSON(c["index"], &choice)
+			if t.called == nil {
+				t.called = map[int]bool{}
+			}
+			t.called[choice] = true
 			if mended, chg := t.ids.mend(choice, calls); chg {
 				calls, delta["tool_calls"] = mended, mended
 				inDelta = true
@@ -168,6 +202,10 @@ func (t *chatTidy) line(line []byte) []byte {
 		}
 		if inDelta {
 			c["delta"], _ = json.Marshal(delta)
+			changed = true
+		}
+		if t.called[choice] && string(bytes.TrimSpace(c["finish_reason"])) == `"stop"` {
+			c["finish_reason"] = json.RawMessage(`"tool_calls"`)
 			changed = true
 		}
 	}
@@ -202,6 +240,64 @@ func withoutEmptyNames(raw json.RawMessage) (json.RawMessage, bool) {
 		}
 		delete(fn, "name")
 		call["function"], _ = json.Marshal(fn)
+		changed = true
+	}
+	if !changed {
+		return raw, false
+	}
+	out, err := json.Marshal(calls)
+	if err != nil {
+		return raw, false
+	}
+	return out, true
+}
+
+// streamCallIndexes is what chatTidy keeps to give a streamed tool call
+// the upstream sent no index for one: each choice's open call.
+type streamCallIndexes map[int]*openCall
+
+// openCall is a choice's open tool call: its id, the index it goes by,
+// and the next index to give.
+type openCall struct {
+	open        bool
+	id          string
+	index, next int
+}
+
+// give gives each fragment of a delta's tool_calls with no index (none,
+// or null) the index of the call it belongs to, and reports whether it
+// gave any. A fragment with an id other than the open call's, or after
+// the first in its delta, starts the next call, as chatDecoder reads a
+// call with a new id; any other goes on with the open one. So two calls
+// in chunks of their own are 0 and 1: given both 0, by their place, OpenAI's
+// node SDK merged them into one call. A fragment with an index keeps it,
+// and the next one given comes after it.
+func (s streamCallIndexes) give(choice int, raw json.RawMessage) (json.RawMessage, bool) {
+	var calls []map[string]json.RawMessage
+	if decodeJSON(raw, &calls) != nil {
+		return raw, false
+	}
+	o := s[choice]
+	if o == nil {
+		o = &openCall{}
+		s[choice] = o
+	}
+	changed := false
+	for k, c := range calls {
+		id := callID(c["id"])
+		if v, ok := c["index"]; ok && string(v) != "null" {
+			var n int
+			if decodeJSON(v, &n) == nil {
+				o.open, o.id, o.index = true, cmp.Or(id, o.id), n
+				o.next = max(o.next, n+1)
+			}
+			continue
+		}
+		if !o.open || k > 0 || id != "" && id != o.id {
+			o.open, o.id, o.index = true, id, o.next
+			o.next++
+		}
+		c["index"], _ = marshalPlain(o.index)
 		changed = true
 	}
 	if !changed {
@@ -324,6 +420,12 @@ func (t *chatWhole) flush() []byte {
 			}
 			mended = true
 		}
+		// calls the upstream made, ended "stop" (chatTidy)
+		var native []json.RawMessage
+		if string(bytes.TrimSpace(c["finish_reason"])) == `"stop"` && decodeJSON(msg["tool_calls"], &native) == nil && len(native) > 0 {
+			c["finish_reason"] = json.RawMessage(`"tool_calls"`)
+			changed = true
+		}
 		if !mended {
 			continue
 		}
@@ -434,7 +536,7 @@ func silentAssistantsOut(body []byte) []byte {
 		return body
 	}
 	var q map[string]json.RawMessage
-	if decodeJSON(body, &q) != nil {
+	if decodeJSON(body, &q) != nil || !anySilentAssistant(q["messages"]) {
 		return body
 	}
 	dec := json.NewDecoder(bytes.NewReader(q["messages"]))
@@ -453,6 +555,80 @@ func silentAssistantsOut(body []byte) []byte {
 		return body
 	}
 	return nb
+}
+
+// anySilentAssistant says whether a Chat request's messages hold a turn
+// silentAssistant leaves out, decoding only the assistant turns to see.
+// silentAssistantsOut runs on every attempt of every Chat request relayed
+// as sent, and almost none has such a turn: decoding every message to
+// look made it the gateway's largest allocation after the body itself
+// (~4 MB a request for a 1.5 MB conversation, yg6888 on X).
+func anySilentAssistant(msgs json.RawMessage) bool {
+	if len(msgs) == 0 || msgs[0] != '[' { // valid: decodeJSON checked the body it is in
+		return false
+	}
+	found := false
+	eachElement(msgs, func(el []byte) bool {
+		if el[0] != '{' {
+			return true
+		}
+		assistant, said := false, false
+		eachMember(el, func(key, val []byte) bool {
+			switch {
+			case jsonStringIs(key, "role"):
+				assistant = jsonStringIs(val, "assistant")
+			case jsonStringIs(key, "content"):
+				said = textSaysSomething(val)
+			}
+			return true
+		})
+		if !assistant || said {
+			return true // a turn with text in it is never left out
+		}
+		dec := json.NewDecoder(bytes.NewReader(el))
+		dec.UseNumber()
+		var m map[string]any
+		found = dec.Decode(&m) == nil && silentAssistant(m)
+		return !found
+	})
+	return found
+}
+
+// textSaysSomething says whether q, a valid JSON value, is a string with
+// an ASCII character in it that isn't a space: text strings.TrimSpace
+// leaves. Escapes are passed over, so "\n" and an escaped U+3000 say
+// nothing here, and what it can't tell is false, for silentAssistant to
+// look at.
+func textSaysSomething(q []byte) bool {
+	if len(q) < 2 || q[0] != '"' {
+		return false
+	}
+	for i := 1; i < len(q)-1; i++ {
+		switch c := q[i]; {
+		case c == '\\':
+			if q[i+1] == 'u' {
+				i += 5
+			} else {
+				i++
+			}
+		case c > ' ' && c < 0x7f:
+			return true
+		}
+	}
+	return false
+}
+
+// jsonStringIs says whether q, a JSON value, is the string s, unquoting
+// only a string with an escape in it.
+func jsonStringIs(q []byte, s string) bool {
+	if len(q) == len(s)+2 && q[0] == '"' && string(q[1:len(q)-1]) == s {
+		return true
+	}
+	if len(q) == 0 || q[0] != '"' || bytes.IndexByte(q, '\\') < 0 {
+		return false
+	}
+	u, ok := unquoteJSON(q)
+	return ok && u == s
 }
 
 // reasoningDetailsAsContent leaves reasoning_details out of every message

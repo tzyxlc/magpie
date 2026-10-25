@@ -89,7 +89,7 @@ line; agents connected to magpie lose it when it quits.
 
 | Agent        | File                              | Fields          |
 | ------------ | --------------------------------- | --------------- |
-| Claude Code  | `~/.claude/settings.json`         | provider, model, opus/sonnet/haiku/fable, sign-in (through magpie) |
+| Claude Code  | `~/.claude/settings.json`         | provider, model, opus/sonnet/haiku/fable, auto mode, sign-in (through magpie) |
 | Claude Desktop | `Claude/` + `Claude-3p/configLibrary/` in `~/Library/Application Support` (`%LOCALAPPDATA%` on Windows, `~/.config` on Linux). A Desktop installed as an MSIX package on Windows keeps them in its package instead (`%LOCALAPPDATA%\Packages\Claude_<publisher>\LocalCache\Local`, or `AnthropicPBC.Claude_<publisher>` for the Store's package, its own data in `LocalCache\Roaming\Claude`). Desktop 2.31226 and later, packaged, reads the real `%LOCALAPPDATA%\Claude-3p` instead, so for a packaged Desktop magpie writes both ([`desktopdir`](../internal/desktopdir/desktopdir.go)) | provider (its third-party gateway mode: Code and Cowork on magpie, no Anthropic sign-in; restart Desktop), opus/sonnet/haiku/fable, subagent model and subagent effort (magpie's settings, applied by the gateway to subagent tool turns; no restart) |
 | Codex        | `~/.codex/config.toml`            | provider, model, effort |
 | Gemini CLI   | `~/.gemini/settings.json`, `~/.gemini/.env` | auth, model |
@@ -109,6 +109,7 @@ line; agents connected to magpie lose it when it quits.
 | VS Code (Chat) | `~/Library/Application Support/Code/User/settings.json` + `chatLanguageModels.json` (`~/.config/Code/User` on Linux, `%APPDATA%\Code\User` on Windows) | model (`chat.defaultModel`; a `magpie` Custom Endpoint group, its catalog in Chat's model picker; VS Code 1.122+, no Copilot sign-in or key needed). Each profile's own pair under `User/profiles/<id>/` (listed in `globalStorage/storage.json`) gets the same, unless the profile uses the default's |
 | VS Code Insiders (Chat) | the same files under `Code - Insiders/User` in place of `Code/User` | as VS Code, a row of its own; its models send the token `magpie-vscode-insiders`, since its chat's User-Agent is VS Code's |
 | VSCodium (Chat) | the same files under `VSCodium/User` in place of `Code/User` | as VS Code, a row of its own; its models send the token `magpie-vscodium`, so Usage counts them as VSCodium; its Chat features must be turned on (`chat.disableAIFeatures=false`, and `defaultChatAgent` plus `trustedExtensionAuthAccess` for GitHub.copilot-chat in its product.json). With the Marketplace's GitHub Copilot Chat 0.48.1, which has no Custom Endpoint provider, the group is written for its OpenAI Compatible provider (`customoai`, the token sent as `x-api-key`), which lists models only while Copilot Chat is signed in to GitHub with a personal Copilot plan |
+| Zoo Code (VS Code) | VS Code's `Code/User/settings.json` (and each profile's): `zoo-code.autoImportSettingsPath` names `globalStorage/zoocodeorganization.zoo-code/settings/magpie-import.json` beside it | model (one provider profile `magpie`, OpenAI Compatible, imported by Zoo Code at start-up) |
 | Copilot (JetBrains) | `byok.json` in `~/.config/github-copilot` (`$XDG_CONFIG_HOME/github-copilot` when set, `%USERPROFILE%\AppData\Local\github-copilot` on Windows), the Copilot language server's own file, which Xcode's and Eclipse's Copilot read too | provider (a `magpie` custom endpoint provider beside the user's: every magpie model at the gateway's `/v1/chat/completions`, sent with `magpie-copilot-jetbrains`; a model hidden in Manage Models stays hidden through a sync; off removes magpie's three keys alone). Found by the `github-copilot-intellij` plugin in a JetBrains IDE or Android Studio. Listed after the IDE restarts, and only while Copilot is signed in to GitHub on a plan with Bring Your Own Key (Free, Pro, Pro+; Business and Enterprise when the organisation allows it); the model is picked in Copilot Chat |
 | JetBrains Air | `acp.json` in `~/Library/Application Support/JetBrains/Air` (`~/.config/JetBrains/Air` on Linux, `%APPDATA%\JetBrains\Air` on Windows) + `magpie-opencode.json` beside it | model (a `Magpie` ACP agent: OpenCode's `opencode acp` on magpie's provider alone, its models and routing groups in Air's model menu; needs OpenCode installed) |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
@@ -135,11 +136,12 @@ line; agents connected to magpie lose it when it quits.
 | Qoder CN (CLI) | `~/.qoder-cn/settings.json` (`$QODERCN_CONFIG_DIR`) | model, effort (as Qoder; its own accounts, a Qoder CN plan with BYOK) |
 | Grok Build   | `~/.grok/config.toml` (`$GROK_HOME`) | model, effort |
 | Grok App     | `agent-home/config.toml` in its data folder (`$GROK_APP_HOME`, else `~/Library/Application Support/com.grokapp.grok-app`, `%APPDATA%\grokapp\grok-app\data`, `$XDG_DATA_HOME/grok-app`, or `~/.grok-app`) | model (a `[model.magpie]` custom provider under Accounts, with magpie's models and their effort levels in `app_models`; the route, `[models] default`, stays until the user presses Use on magpie there (one of the App's own routes picked in magpie is written as the route, and magpie's channel goes); a route an older magpie set to `magpie` is put back once; Disconnect drops the channel and puts the route back only if it is still `magpie`, else the one it was on before Connect if none is left; a model or default effort picked in the App kept; instructions, MCP and skills are the Library's Grok App row on agent-home; RTK has no hook for it or for Grok Build) |
-| ZCode        | `~/.zcode/v2/config.json`         | provider (magpie's models in ZCode's picker) |
+| ZCode        | `~/.zcode/v2/provider_config.json` and `config.json`, under the data folder moved in ZCode's settings (`dataBaseDir`); `~` is `$HOME` when set, on Windows too, as ZCode reads it before `%USERPROFILE%` | provider (magpie's models in ZCode's picker) |
 | WorkBuddy    | `~/.workbuddy/models.json` (`$WORKBUDDY_CONFIG_DIR`) | provider (magpie's models in WorkBuddy's picker) |
 | WorkBuddy AI | `~/.workbuddy-ai/models.json` (the international build) | provider (magpie's models in WorkBuddy AI's picker) |
 | CodeBuddy Code | `~/.codebuddy/models.json` (`$CODEBUDDY_CONFIG_DIR`), `settings.json` | model (magpie's models in its list; the session model) |
 | Raycast      | `~/.config/raycast/ai/providers.yaml` in the user's folder, on Mac and Windows | provider (a `magpie` entry in Raycast AI's Custom Providers, magpie's models in its model picker; Raycast Pro; the user's providers, `tools` and comments kept) |
+| Kiro Crew    | `~/.kiro/crew/config.json` (`$KIROCREW_HOME`; `config.local.json` over it is left alone) | provider, harness (`agent.acp_backend`, and `agent.member_acp_backend` for a harness that can dispatch: an agent already connected to magpie, so its models are magpie's; the user's value is put back on Disconnect) |
 | OpenPencil   | `openpencil/settings.json` in the config folder: `~/Library/Application Support` (macOS), `$XDG_CONFIG_HOME` or `~/.config` (Linux), `%APPDATA%` (Windows) | provider (a `magpie` entry in its `builtin_agents`, magpie's models in its chat's model picker; the user's entries and settings kept; refused while OpenPencil runs, as it writes the file back when it quits) |
 | T3 Code      | `~/.t3/userdata/settings.json` (`$T3CODE_HOME/userdata`) | provider (a `magpie` provider instance on Claude Code, magpie's models as its custom models) |
 | OpenHanako   | `~/.hanako/provider-catalog.json` + `agents/<id>/config.yaml` (`$HANA_HOME`; its local API while it runs) | model (the primary agent's; magpie's models as a provider) |
@@ -200,6 +202,23 @@ compatible GitHub Copilot Chat extension, since the Open VSX registry does
 not normally provide Microsoft's extension. Restart VSCodium, or run
 **Developer: Reload Window**, after changing these files. Magpie's models
 then appear under the `magpie` custom endpoint group.
+
+#### Zoo Code
+
+Zoo Code (the VS Code extension `ZooCodeOrganization.zoo-code`) keeps its
+provider profiles in VS Code's encrypted secret storage, which magpie can't
+write. Magpie uses Zoo Code's own `zoo-code.autoImportSettingsPath` setting
+instead: it writes a settings file, `magpie-import.json` in Zoo Code's
+`globalStorage/zoocodeorganization.zoo-code/settings` folder, with one OpenAI Compatible profile named `magpie` (the
+gateway's `/v1`, the key `magpie-zoo-code`, the model picked), and points the
+setting at it in VS Code's `settings.json` and each profile's. Zoo Code imports
+that file each time it starts, so run **Developer: Reload Window** after a
+change. While connected, every start switches Zoo Code back to the `magpie`
+profile. Disconnect puts the setting back as it was and deletes the file, but
+the imported `magpie` profile stays in Zoo Code: pick another profile there, or
+delete it in Zoo Code's settings. Only VS Code (Stable) is wired. Zoo Code for
+JetBrains starts its extension with an empty configuration, so the setting
+can't reach it there.
 
 #### Zed-compatible Agent paths
 
@@ -412,7 +431,7 @@ dee@example.com`); otherwise it appears as **account not recorded**, never
 inferred from today's sign-in. OTLP export never carries the account.
 
 One magpie can serve several computers (an office one, a personal one):
-share it on the network (Settings → Share on local network), and on each
+share it on the network (Settings → Network and sharing → Share on local network), and on each
 other computer add it as a **Remote magpie** — in the app's Add sheet, under
 its own heading, Another computer's magpie, after On this machine; on the
 TUI's Providers page (`a`, then its address and key; `w` changes the address,
@@ -487,7 +506,7 @@ works. Changing one starts nothing by itself. See
 [provider-plugins.md](subsystems/provider-plugins.md#a-plugins-own-options).
 
 The gateway issues **gateway keys** for clients, separate from a provider's
-upstream API keys. Turn on **Settings → Share on local network**, then open
+upstream API keys. Turn on **Settings → Network and sharing → Share on local network**, then open
 **Gateway → Gateway keys → Add gateway key**. This block appears only while
 sharing is on. Create a named key for each client and copy it from its row.
 To move from another gateway without touching its clients, enter the key they
@@ -669,7 +688,7 @@ another machine (#1022): it carries a forwarding header (`Forwarded`,
 with sharing, or a `MAGPIE_ADDR` on the network, it needs an enabled gateway
 key, as from the network. This
 covers every route: the model APIs, quotas, MCP sign-ins. To serve magpie
-through a Cloudflare Tunnel, turn on **Settings → Share on local network**,
+through a Cloudflare Tunnel, turn on **Settings → Network and sharing → Share on local network**,
 add a gateway key for each client, point the tunnel's service at
 `http://127.0.0.1:3425`, and give clients the tunnel's address with that key.
 A tunnel that forwards bare TCP (frp's `tcp`, `ssh -R`, socat) adds no header
@@ -946,7 +965,10 @@ the hook as a variable (or cast it), or put the icon in `package.json`.
 #### Gateway middleware
 
 A plugin can also be gateway middleware: `onRequest(body, ctx)` sees each
-request an agent sends before it is routed, `onEvent(event, ctx)` each
+request an agent sends before it is routed, `onProvider(body, ctx)` the
+body each provider it is tried on is sent (`ctx.provider` has its `id`,
+`name`, `account` and `model`; each try starts from what `onRequest`
+left), `onEvent(event, ctx)` each
 event of a streamed reply and `onResponse(body, ctx)` a whole one, all in
 the agent's own API. A hook returns the changed object, or nothing to
 leave it; `onEvent` returns `null` to drop an event, and
@@ -999,7 +1021,9 @@ Ready-made middleware, under Plugins › Discover › Gateway middleware
 (`@magpie-community/middleware-<name>`), mostly New API's channel settings
 with the same JSON: `param-override` (`param_override`), `model-map`
 (`model_mapping`), `system-prompt`, `word-guard` (sensitive words) and
-`think-tags` (strip `<think>…</think>`, or `thinking_to_content`). A
+`think-tags` (strip `<think>…</think>`, or `thinking_to_content`), and
+`antigravity-cloak`, which keeps the words Antigravity turns Claude Code's
+system prompt away for out of what it sends Antigravity alone. A
 middleware's entry in the community `registry.json` has
 `"kind": "middleware"` and no `providers`.
 
@@ -1025,6 +1049,21 @@ export function connect({ gateway, model, models }) {
 It is then on the Agents page like magpie's own: picking one of magpie's
 models writes the model and what `connect` returns, and its own model or
 Disconnect puts every key back as it was. It runs in moejs like middleware.
+`connect` gets `gateway` (`url`, `v1`, `key`), `model` and `models` (each
+`id`, `name`, `context`, `output`, `images`, `efforts`), and `agent`
+(`id`, `config`). Each model also has what `/v1/models` says of it, by the
+same names: `native_endpoints`, the gateway paths a request for it goes on
+untranslated, and `pricing`, USD a token as decimal strings, so an agent
+can ask a model on the API that passes straight through and show what a
+call costs. Each is left out when it isn't known (a routing group has no
+`native_endpoints`, an unpriced model no `pricing`), never empty or 0:
+
+```json
+{ "id": "deepseek/pro", "name": "pro · DeepSeek", "context": 0, "output": 0, "images": false, "efforts": [],
+  "native_endpoints": ["/v1/chat/completions"],
+  "pricing": { "prompt": "0.0000003", "completion": "0.0000012", "input_cache_read": "0.00000003" } }
+```
+
 An id magpie's own agents use is refused. In the market an agent's entry has
 `"kind": "agent"` (`@magpie-community/agent-<name>`). The full reference is
 on the site's Plugins page, under Agent plugins.
@@ -1139,6 +1178,37 @@ provider and model. Records now identify upstream API keys, but a provider
 charging different tariffs per key still cannot be costed exactly from a
 single provider-wide price.
 
+### Counting two ids as one model
+
+A vendor can name one model two ways, as `deepseek-v4.1-flash` and
+`deepseek-flash`, and Usage, Sessions and `magpie usage` then show it as two
+rows. Say they are one, and every place that counts usage by model counts
+them under the name you gave:
+
+```sh
+magpie model alias deepseek-v4.1-flash deepseek-flash   # count it as deepseek-flash
+magpie model alias deepseek-v4.1-flash                  # what it is counted as
+magpie model alias deepseek-v4.1-flash --reset          # under its own id again
+magpie model aliases                                    # every alias you set
+```
+
+It is kept in settings.json as `"usageAliases": {"deepseek-v4.1-flash":
+"deepseek-flash"}`, and nothing changes until you write one. Both sides are
+model ids with no provider, matched the way routing groups match them: a
+vendor's `prefix/`, case, `_` against `-` and a snapshot date make no
+difference, and the alias holds at every provider. An alias of an alias is
+followed to its end; one that maps a model to itself or loops back to it is
+refused.
+
+An alias is how usage is **shown**, nothing more. Requests still ask for the
+id the agent picked, the model lists written into agents and the gateway's
+`/v1/models` are unchanged, and routing groups and Same as are separate.
+Each call is still **priced by the id it was made under** and only then
+counted under the alias: the alias's own price is never put on the other
+id's calls, and a merged row is priced only when every id in it is. The
+Usage page's Requests list and its model filter still show each request's
+own id.
+
 ### What a model takes
 
 A provider that serves a model models.dev does not list, or lists at the
@@ -1179,6 +1249,41 @@ keeps in the agents' own files — Pi's `contextWindow` and `maxTokens`, OpenCod
 at start-up. A session already running therefore keeps the window it began with,
 while the gateway's own `/models` and every request from then on are right at
 once.
+
+#### All of a model at once: `magpie model spec`
+
+`magpie model spec` sets a model's window, reply limit, vision and reasoning
+levels in one command, and says where each value magpie goes by came from:
+
+```sh
+magpie model spec kenari/glm-5:free                          # what it has, and whether each is yours
+magpie model spec kenari/glm-5:free --context 128k --output 16k --vision on --reasoning low-high
+magpie model spec kenari/glm-5:free --reasoning low,medium,high   # a list instead of a range
+magpie model spec kenari/glm-5:free --reasoning off          # send it no reasoning field
+magpie model spec kenari/glm-5:free --vision auto            # take one value of yours off
+magpie model spec "kenari/*" --context 200000 --output 32k   # every model of the provider without its own
+magpie model spec kenari/glm-5:free --reset                  # take every value of yours off
+magpie model specs                                           # the models you gave a spec
+```
+
+It writes the same stores `magpie model context`, `output`, `images` and
+`efforts` do — the window in providers.json, the rest in settings.json
+(`modelOutputs`, `modelImages`, `modelEfforts`, `modelReasonless`) — so the
+order above holds for each part, and a catalog refresh keeps them. A model
+nothing knew the levels of can be given them (`--reasoning low-high`), and
+a request to it is sent at the nearest of those. One that has its own can
+only be narrowed to some of them, which narrows what agents are offered:
+the vendor is still asked at any level it has, as with
+`magpie model efforts`. A bad number, an
+unknown flag, a level that isn't one, or a range that runs backwards is
+refused, and nothing of the command is written.
+
+What you set wins everywhere magpie reads a model: the app's badges and
+level chips, the gateway's `/v1/models` (`context_window`,
+`max_output_tokens`, `reasoning_levels`), the `max_tokens` a request is sent
+with, whether images reach it or are described
+first, which model magpie picks to describe images, and the model lists
+magpie writes into the agents.
 
 ### The name a vendor knows a model by
 
@@ -1432,7 +1537,8 @@ each of these groups ordered by the share used.
   left end first goes first. The daily Free Plan credits aren't counted,
   since they end at the same midnight on every account. A Claude account
   magpie knows nothing of yet goes first once, to learn what it has left
-  from the answer; any other unknown account goes after those known.
+  from the answer; any other unknown account goes after those known,
+  and is still tried when they fail, ahead of any at 90% or more.
   An account with a month beside its week (Factory) goes by its month:
   when the month holds less than its weeks add up to (Factory's, by
   one user's readings, about two weeks' worth), what a week leaves isn't
@@ -1441,7 +1547,12 @@ each of these groups ordered by the share used.
   on the Routing page says the fullest window's share with when that
   window renews: "32% used · renews in 3 days" is the week's.
 - **In order**: the accounts in their order. The first takes every request
-  until it is used up (100%) or fails.
+  until it is used up (100%) or fails. A routing group set In order tries
+  its members in the order given, whatever is known of what each has
+  left: a member whose allowance isn't known isn't moved behind one whose
+  is. Each member's own accounts go as its provider routes them, and the
+  Routing page says an account went after those known only of one
+  weighed against a known account of the same member.
 - **In turn**: each turn of a conversation goes to the next account. A new
   conversation goes to the account the fewest other conversations of the
   last 30 minutes are on.
@@ -1664,13 +1775,23 @@ Building an app or agent that should use magpie, or get a row on the
 Agents page: see [Integrating your app or agent](integrating.md).
 
 External clients behind a reverse proxy need an enabled gateway key
-(Gateway → Gateway keys): with Settings → Share on local network on, or a
+(Gateway → Gateway keys): with Settings → Network and sharing → Share on local network on, or a
 `MAGPIE_ADDR` on the network, magpie asks for one; otherwise it refuses
 them, unless the proxy authenticates its clients itself
 (`MAGPIE_TRUST_PROXY=1`, below). A public URL with no port of
 its own — a reverse proxy's `https://magpie.example.com` — is the address
-`magpie web` prints for its own page too, so the proxy must forward `/v1`
-and `/v1beta` to the gateway's port and the rest to the page's. When the
+`magpie web` prints for its own page too. One location is enough: the
+page's port (`127.0.0.1:3430`) answers the gateway's client routes as well
+(`/v1/…`, `/v1beta/…`, `/mcp/…`, `/backend-api/codex/…` and the same
+routes without `/v1`), handing them to the gateway, so a proxy that sends
+everything to the page's port serves the page at `https://magpie.example.com/`
+and the agents at `https://magpie.example.com/v1`. Those routes are judged
+there exactly as on the gateway's port (the allow list, a gateway key from
+another machine or through the proxy, the Origin and Host checks); the
+page's sign-in cookie is no gateway key, and the page and its `/api` still
+need the page's key. Ollama's `/api/*` and Claude Desktop's `/api/hello`
+are the page's own namespace on that port, so a client of those is given
+the gateway's own port. When the
 proxy and magpie run on the same machine, a request it forwards over
 loopback carries a forwarding header and needs a gateway key as one from
 the network does (see [Providers and the gateway](#providers-and-the-gateway)); a proxy that
@@ -1688,6 +1809,7 @@ It exposes:
 | `/v1/audio/transcriptions`, `/v1/audio/translations` | OpenAI speech to text (multipart, passed through) |
 | `/v1/models`, `/v1beta/models` | the catalog            |
 | `/v1/codex/models`       | the catalog as Codex's `model_catalog_url` reads it ([Codex on another computer](#providers-and-the-gateway)) |
+| `/api/version`, `/api/tags`, `/api/show` | the catalog as an Ollama server lists it, for a client that takes a custom endpoint only as Ollama (below) |
 
 Each `/v1/models` entry includes `reasoning` and `supported_reasoning_levels`
 (`[{"effort":"low"}, ...]`), and the same levels as plain names in
@@ -1703,6 +1825,17 @@ what the agent asked, as before. `native_endpoints`
 (`["/v1/messages"]`) names the APIs a request for the model is passed
 straight through on; it is left out of a routing group, and of a model every
 request to which is translated anyway.
+
+A client that takes a custom endpoint only as an Ollama server (Visual
+Studio's and VS Code's Copilot: Manage Models, then Ollama) is given
+`http://127.0.0.1:3425` as the Ollama URL, no `/v1`. It reads the models
+from `/api/tags`, each one's tools, vision, thinking and window from
+`/api/show`, and chats on `/v1/chat/completions`. Ollama's own chat
+(`/api/chat`, `/api/generate`, so `ollama run`) isn't served. Copilot sends
+no key, so this works on this computer only; behind a reverse proxy with a
+single public URL, `/api` goes to `magpie web`'s page (which answers the
+gateway's `/v1` routes but not its `/api` ones), so give the gateway's own
+port.
 
 Requests pass straight through when the vendor speaks the agent's API and
 are translated otherwise, streaming, tool calls and reasoning included. The
@@ -1828,6 +1961,21 @@ its cores and `GOMAXPROCS`, and the goroutine count. Go records one CPU
 profile at a time, so a second `magpie cpu` while one records is refused
 409; one whose caller hangs up stops recording. The route answers the same
 callers as `/v1/magpie/heap`, and refuses the same ones 403.
+
+`magpie goroutines [<file>]` is for a report of magpie stuck at something
+while it goes on running, such as an app that kept an old partner list for
+days (#3362): killing it to look would end what was stuck. It asks the same
+running magpie for `GET /v1/magpie/goroutines`, every goroutine's stack as
+text (`runtime/pprof`'s `goroutine` profile at debug 2, the form a crash
+prints): each goroutine's state and how long it has waited
+(`[select, 4320 minutes]`), its frames with source lines, and who started
+it. Arguments are printed as numbers, never what they point at, so it holds
+no keys or messages. Nothing is stopped. It writes the dump to `<file>`,
+else `magpie-goroutines-<date>-<time>.txt` in the working folder, never
+over a file there, and prints the file and the process the gateway names in
+`X-Magpie-Goroutine-Stats` (its id, program, version, uptime and goroutine
+count). The route answers the same callers as `/v1/magpie/heap`, and
+refuses the same ones 403.
 
 A gateway key held to a budget, to some models or to some accounts is told
 none of this magpie's accounts (#1981): `/v1/magpie/quotas`,
@@ -2172,7 +2320,9 @@ The service serves only the gateway unless asked for the page:
 `magpie daemon install --web` (or `magpie daemon web on` once installed)
 runs `magpie serve --web`, which serves the gateway and `magpie web`'s
 page from one process, so the page shows the service's own gateway,
-providers and accounts. It listens on `127.0.0.1:3430`; `--lan` puts it on
+providers and accounts. It listens on `127.0.0.1:3430`, which answers the
+gateway's `/v1` routes too (see [Connecting anything else](#connecting-anything-else)), so one
+reverse-proxy location serves both; `--lan` puts it on
 `0.0.0.0:3430` and `--addr host:port` anywhere, with the same warning as
 `magpie web --lan`: anyone with the link can change your settings. Its key
 is made once and kept in the service file (as `MAGPIE_WEB_KEY`, readable by
@@ -2225,9 +2375,10 @@ uses the service's gateway.
 
 ### Docker
 
-`docker build` makes a server image: the terminal-only binary on
-distroless (`cc`, for the glibc the plugins' Bun needs) with bash and
-busybox for a terminal in the container (`docker exec -it magpie bash`, or a
+`docker build` makes a server image: the terminal-only binary on Debian 12
+slim, with bash and curl, so a vendor's `curl … | bash` installer runs and
+the CLI it installs (Cursor's, Devin's, Grok Build) finds the glibc it links,
+as the plugins' Bun does, and a terminal opens in the container (`docker exec -it magpie bash`, or a
 NAS panel's terminal; `magpie` is on its PATH), run as nonroot,
 with everything it keeps in a volume at `/config`: magpie's own files
 (`/config/magpie`), the sign-ins kept where their agent keeps them (HOME is
@@ -2247,7 +2398,7 @@ request from outside it, the host's own included, must carry an enabled
 gateway key as its API key, and one without gets 401. Make one in the
 browser UI (Gateway → Gateway keys) or with
 `docker exec magpie magpie gateway-key add "Docker client"`. Sharing
-(Settings → Share on local network) isn't needed for this; turning it on
+(Settings → Network and sharing → Share on local network) isn't needed for this; turning it on
 also creates a key named **Magpie**. The ports above are published on the
 host's loopback; Docker's `-p 3425:3425` puts the gateway on every interface
 of the host, for other machines to reach. Upgrading from an earlier image:
@@ -2299,9 +2450,10 @@ expose it publicly without gateway-key authentication.
 Such a page is in **gateway mode**: it shows Providers, Gateway, Routing,
 Usage, Plugins and Settings, with no Agents, Sessions or Library tab, and
 Settings leaves out what is written into this machine's agents (provider in
-model names, Codex subagents, long conversations, Codex thread titles,
-Codex thread descriptions, Codex composer predictions) and
-the desktop's alerts and tray. `magpie web` is in it by itself when it finds
+model names) and the desktop's alerts and tray. Codex's and Claude Code's own
+settings (Codex subagents, long conversations, Codex thread titles and the
+rest) are on the Agents page, in the agent's opened row, so a gateway has
+none of them. `magpie web` is in it by itself when it finds
 no agents on its machine, as in the container, and with
 `magpie web --gateway`. *Settings › General › Gateway mode* picks Automatic,
 On or Off for this machine (it wins over both); Off brings every page back.

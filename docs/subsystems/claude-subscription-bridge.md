@@ -422,6 +422,57 @@ A client that drops the images' message without adding text to a result
 goes on only when that message held images alone, no text. A tool result of an image alone (pi-ai's "(see attached image)")
 whose text is replaced by the line is not this shape, and starts anew.
 
+## How many Claude Code processes run (`claudeRoom`, #2956)
+
+Every Claude Code magpie starts for a Claude subscription takes a place in
+`claudeRoom` (`claude_room.go`) before it starts, and frees it once its
+process has exited: each conversation's run (`startRun`), busy, idle or
+parked on tool results, and each one-off test, warm-up and /usage read
+(`runClaudeTree`). Nothing bounded them before. Claude Code 2.1.303 holds
+about 205 MiB RSS idle on Linux arm64, 86–112 MiB of it its own, and a
+512 MiB systemd service had 2 busy runs and 14 starting at once when the
+kernel's OOM killer ended them. In Docker under a 512 MiB memory cgroup,
+six idle runs were enough for two OOM kills.
+
+How many may run (`claudeRunsMost`):
+
+- the user's `claudeRunsMost` in settings.json, set with
+  `magpie claude-code runs N` (`auto` clears it). It is this machine's own
+  setting (`KeepOwn`): a sync never brings a desktop's number to a server.
+- otherwise, on Linux, `(limit − 256 MiB) / 128 MiB`, at least 1, where
+  the limit is the least of MemTotal, the cgroup v2 `memory.max` and
+  `memory.high` of magpie's cgroup and every one above it, and the cgroup v1
+  `memory.limit_in_bytes` (`memLimit`). 512 MiB gives 2, 1 GiB 6, a 964 MiB
+  machine with no cgroup limit 5. It is read once per process.
+- otherwise no bound: macOS, Windows, and a Linux whose limits can't be
+  read. A limit not known is not a small one.
+
+An ask that finds no room (`take`):
+
+1. lets go of the run idle longest, of any bridge. Its session is shelved,
+   as a run pushed past `idleMost` is, so its conversation's next turn
+   resumes it (`--resume`) and is told only the new messages.
+2. otherwise lets go of the run parked longest on tool results, once it has
+   waited `parkLongest`. Busy runs, and runs waiting on tool calls made
+   recently, are never let go.
+3. otherwise waits for one to end: woken when a process exits or a run
+   goes idle (`nudge`), and it looks again every `roomLook` (5s) for a
+   parked run that has come to wait `parkLongest`.
+
+A run being ended counts as `leaving`, so several waiting asks don't each
+let one go for the same room. After `claudeRoomWait` (2 minutes), or once
+the request's context ends, the ask gives up. A conversation's turn is
+answered 503 with "N Claude Code processes are running, as many as may run
+at once (why); none ended within …" and how to set the number. `start`
+doesn't retry without the saved session after such an error. A /usage read
+returns it as its error.
+
+Routing treats that 503 (`claudeNoRoom`) as a protected failure. No
+account is rested, no other Claude account is asked next (each would wait
+for the same room), and the request isn't tried again after a moment. A
+member of the group at another provider answers it. Alone, the client gets
+the 503.
+
 ## Files a run leaves
 
 - Its session: `<config>/projects/<work project>/<session>.jsonl`, for
@@ -503,6 +554,19 @@ hook's output, or nothing (the run's Claude Code doesn't show a bare
 without marking it `[user message]`. A reminder with other words in it is
 still the user's, as #872's was.
 
+A background sub-agent's `<task-notification>` (with its "[SYSTEM
+NOTIFICATION - NOT USER INPUT]" head) is not the user's either, but the
+run's model must hear it. Claude Code 2.1.310 sends one that finishes while
+its main agent is mid-turn as a `{role: "system"}` message after the
+results (several that finish together share one text block), or as text
+after them in their message. `withTaskNotices` appends each to the last
+result, inside `<system-reminder>`, as Claude Code itself does for a
+notification that lands in a tool's result, and `saidWithResults` strips
+them before judging what is left. Before, `agentNotice` dropped them
+whole, the run never heard the sub-agent finished, and the main agent
+waited for it (stones_2026 on Discord). A notification after a reply is a
+turn of its own and is told as it is.
+
 Where the result ends is said by the message's parts alone. A tool whose
 output says "Do not use tools." has it told as its output, inside the
 result. The words of a message that holds images (pi-ai's "Attached
@@ -516,6 +580,32 @@ then gets a run started anew, as any request after another answered the
 calls does. Starting such a request anew instead would tell the whole
 conversation to a new run, a prefix the cache has never seen (#1716,
 #1717), for every message sent mid-turn.
+
+## Tool calls written as text
+
+A run told the conversation as text (`renderClaudePrompt`, and
+`renderClaudeTurn` with the client's own calls in the turn) is shown each
+past call as a `[tool call <name> id=… args=…]` line and each result as
+`[tool result id=…]`. The model can copy that form and write its calls as
+text: Claude Code has no call to make, the turn ends with end_turn, and the
+client shows the lines as the reply's words while nothing runs (Zhenzhen on
+Discord: Claude Desktop on Fable 5.1 got
+`[tool call mcp__magpie__Bash id=toolu_0Validate bash args={…}]`).
+
+- Such a prompt ends with a note (`pastCallsNote`) that the lines record
+  earlier calls and that writing one calls nothing. A prompt with no call in
+  it is told as before.
+- `readOutput` holds back a reply's words from the first line that opens
+  with `[tool call ` (`textCalls`); words before it, and lines that only
+  start like it, go on as they come. A reply that ends there with end_turn
+  and calls none of the client's tools isn't ended: once its turn's
+  `result` is in, the run is told `textCallsAsk` as a user message, and the
+  reply goes on in the next message (one `message_start`, as after Claude
+  Code's own call), so the client gets the real `tool_use` and its results
+  go on in the run. It is asked once per reply: written as text again, the
+  words reach the client as written. A run with no input to write to, or a
+  reply that called the client's tools too (the text is left out), is
+  not asked.
 
 ## The account's allowance on the reply (#1257)
 
@@ -538,6 +628,19 @@ claude-hud shows. One that signs in to magpie with magpie's key
 headers only for a claude.ai subscriber. A reply another provider answered
 carries none.
 
+## A restart to update
+
+A run is a Claude Code process of this magpie's, so a restart to update
+that hands the gateway to the new version ([GUI shell](gui-shell.md#a-restart-to-update-hands-the-gateway-over))
+waits for the bridge's turns, and for none of the gateway's other requests
+(`restartBusy` in [`handover.go`](../../internal/gui/handover.go): `Busy.Bridge`,
+`Tools`, `BridgeLast`). A run's tool calls go to the gateway's port, which
+the new one serves once it has the socket; a `claude-mcp` token the new one
+doesn't know is forwarded to the old one's callback socket
+(`ForwardCallbacks`, `forwardCallback`), which serves it until it quits
+(`ServeCallbacks`). A run idle between turns ends with the old process,
+and the next turn starts a run in the new one, as after any restart.
+
 ## Verification
 
 ```sh
@@ -548,7 +651,11 @@ go test -tags nogui ./internal/gateway/ -run '^TestClaudeCodeGivenTheBridgeForAS
 go test -tags nogui ./internal/provider/ -run '^TestClaudeSignInBridgesASOCKSProxy$' -count=1
 go test -tags nogui ./internal/netproxy/ -run '^TestEnvForBunWith' -count=1
 go test -tags nogui ./internal/gateway/ -run '^TestClaudeToolNamesComeBackAsDeclared$' -count=1
-go test -tags nogui ./internal/gateway/ -run 'ClaudeSubscriptionRunsTheDownloaded|ClaudeSubscriptionWithoutClaudeCode|ClaudeRewritten|LostMedia|ImagesTakenOut|RunLetGoWhenTheClientRewrote|ClaudeSessionTempFiles|ClaudeLetGo|ClaudeSessionFiles|ClaudeOldSessions|ClaudeSubscriptionReplySaysTheAllowance|ClaudeAllowanceHeaders|ClaudeForksAnsweringTheLeadsCalls|ClaudeTurnGivenUpOn|ClaudeToolResultsGivenUpOn|ClaudePromptMarksEarlierTurns|ClaudeHistoryCachedAcrossNewRuns|ClaudeUnloadableSession|ClaudeEndedRunSaysWhy|ClaudeIdle|ClaudeSideQuestion|ClaudeNoRunSaysWhy|ClaudeToolResultsNoRunSaysWhy|ClaudePromptToldUserText|ClaudePromptKeepsInstructions|ClaudeToolResultsGoOnWithTheUsersWords|ClaudeToolResultsKeepInstructions|ToolResultKeepsUserTextSentMidTurn' -count=1
+go test -tags nogui ./internal/gateway/ -run 'TestClaudeRunsHeldToTheRoom|TestClaudeRoom|TestClaudeOneOffsTakeRoom|TestClaudeMemRuns|TestClaudeRunsMost|TestClaudeNoRoom' -count=1
+go test -tags nogui ./internal/cli/ -run '^TestClaudeCodeRunsSetsTheUsersOwn$' -count=1
+go test -tags nogui ./internal/settings/ -run '^TestClaudeRunsMostIsMachineLocal$' -count=1
+go test -tags nogui ./internal/gateway/ -run 'ClaudeSubscriptionRunsTheDownloaded|ClaudeSubscriptionWithoutClaudeCode|ClaudeRewritten|LostMedia|ImagesTakenOut|RunLetGoWhenTheClientRewrote|ClaudeSessionTempFiles|ClaudeLetGo|ClaudeSessionFiles|ClaudeOldSessions|ClaudeSubscriptionReplySaysTheAllowance|ClaudeAllowanceHeaders|ClaudeForksAnsweringTheLeadsCalls|ClaudeTurnGivenUpOn|ClaudeToolResultsGivenUpOn|ClaudePromptMarksEarlierTurns|ClaudeHistoryCachedAcrossNewRuns|ClaudeUnloadableSession|ClaudeEndedRunSaysWhy|ClaudeIdle|ClaudeSideQuestion|ClaudeNoRunSaysWhy|ClaudeToolResultsNoRunSaysWhy|ClaudePromptToldUserText|ClaudePromptKeepsInstructions|ClaudeToolResultsGoOnWithTheUsersWords|ClaudeToolResultsKeepInstructions|ToolResultKeepsUserTextSentMidTurn|ClaudeTextToolCalls|ClaudeTextCallsHoldsOnlyTheLine|ClaudePromptSaysPastCallsAreARecord' -count=1
+go test -tags nogui ./internal/gateway/ -run 'TestClaudeTaskNotification|TestWithTaskNotices|TestClaudeTurnToldTheTaskNotification' -count=1
 ```
 
 `claude_rewritten_test.go` has a case for each relaxation and one for each

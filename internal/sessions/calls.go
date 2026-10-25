@@ -94,6 +94,10 @@ type callFile struct {
 	CompactMs int64
 	// Codex
 	CX *cxRun
+	// Pi and omp
+	Pi *piCarry
+	// dsh
+	Dsh *dshCarry
 }
 
 // cxRun is where a rollout's read stands: what its lines have said so far.
@@ -282,7 +286,10 @@ func callsFor(since time.Time, session, agent string) []Call {
 
 // callFiles are the session files that hold calls: Claude Code's, Cowork's
 // and Desktop's own, and Codex's.
-func callFiles() []file {
+func callFiles() []file { return callFilesWith(codexFiles()) }
+
+// callFilesWith is callFiles with codex the rollouts codexFiles found.
+func callFilesWith(codex []file) []file {
 	var out []file
 	seen := map[string]bool{}
 	add := func(fs []file) {
@@ -301,22 +308,26 @@ func callFiles() []file {
 			add(ccFiles("claude-desktop", h))
 		}
 	}
-	add(codexFiles())
+	add(codex)
 	add(wslFiles("claude", "codex"))
 	return out
 }
 
-// callSources are callFiles and the agents whose calls are read whole
-// rather than line by line: OpenCode's (#680) and ZCode's, whose calls are
-// rows of their database or their JSON files; DeepSeek Harness's, whose
-// session file is packed in frames and so cannot be read on from the middle
-// of one; and WorkBuddy's, whose usage lines repeat a reply's id as it goes
-// on, as CodeBuddy Code's do (#1779); and MiniMax Code's, whose messages
-// file a later generation of its history may replace (#1605); and Kimi
-// Code's, whose forks copy their parent's records (#1607). Every agent here
-// needs an entry in wholeCallReaders.
-func callSources() []file {
-	out := callFiles()
+// callSources are callFiles and the other agents' session files. Most are
+// read whole rather than line by line: OpenCode's (#680) and ZCode's, whose
+// calls are rows of their database or their JSON files; and WorkBuddy's, whose usage lines repeat a reply's id as it
+// goes on, as CodeBuddy Code's do (#1779); and MiniMax Code's, whose messages
+// file a later generation of its history may replace (#1605). Kimi Code's
+// (#1607), Pi's and omp's (#1951) are lines of a file only appended to,
+// read on as callFiles' are; DeepSeek Harness's, a file only appended to
+// that may be packed in zstd frames, is read on from the frame it was
+// left in (readDshCalls). Every agent here needs an entry in
+// wholeCallReaders, lineCallReaders or resumeCallReaders.
+func callSources() []file { return callSourcesWith(codexFiles()) }
+
+// callSourcesWith is callSources with codex the rollouts codexFiles found.
+func callSourcesWith(codex []file) []file {
+	out := callFilesWith(codex)
 	out = append(out, openCodeCallFiles()...)
 	out = append(out, zcodeCallFiles()...)
 	out = append(out, dshCallFiles()...)
@@ -326,7 +337,7 @@ func callSources() []file {
 	out = append(out, piCallFiles()...)
 	out = append(out, codebuddyCallFiles()...)
 	out = append(out, agyCallFiles()...) // #2097
-	return append(out, workbuddyCallFiles()...)
+	return distinctPaths(append(out, workbuddyCallFiles()...))
 }
 
 // desktopDataDirs are Claude Desktop's folders on this computer that
@@ -365,7 +376,7 @@ func prepareCalls(f file, old *callFile) *callFile {
 
 	head := headOf(f.path)
 	var st *callFile
-	if old != nil && !packed(f.path) && f.size >= old.Size && old.Off <= f.size && sameHead(head, old.Head, old.HeadSize) && old.ContentHash != "" && prefixHash(f.path, old.Size) == old.ContentHash {
+	if old != nil && !packed(f.path) && f.size >= old.Size && old.Off <= f.size && sameHead(head, old.Head, old.HeadSize) && old.ContentHash != "" && prefixHash(f.path, old.Off) == old.ContentHash {
 		st = old.clone()
 	} else {
 		st = &callFile{Agent: f.agent}
@@ -396,6 +407,18 @@ func (st *callFile) clone() *callFile {
 		r.Contexts = maps.Clone(r.Contexts)
 		r.Timings = append([]cxCallTiming(nil), r.Timings...)
 		c.CX = &r
+	}
+	if st.Pi != nil {
+		p := *st.Pi
+		c.Pi = &p
+	}
+	if st.Dsh != nil {
+		d := *st.Dsh
+		if d.Tail != nil {
+			t := *d.Tail
+			d.Tail = &t
+		}
+		c.Dsh = &d
 	}
 	return &c
 }
@@ -1022,20 +1045,29 @@ func prefixHash(path string, n int64) string {
 	defer f.Close()
 	h := sha256.New()
 	const window, samples = int64(4096), int64(16)
+	// io.CopyN made a 32 KB buffer each call, and each of the 16 samples
+	// of a long file: 0.8 GB of a cold start's first 2 minutes.
+	buf := hashBufs.Get().(*[window * samples]byte)
+	defer hashBufs.Put(buf)
 	if n <= window*samples {
-		if _, err = io.CopyN(h, f, n); err != nil {
+		if _, err = io.ReadFull(f, buf[:n]); err != nil {
 			return ""
 		}
+		h.Write(buf[:n])
 	} else {
 		for i := int64(0); i < samples; i++ {
 			off := (n - window) * i / (samples - 1)
-			if _, err = io.CopyN(h, io.NewSectionReader(f, off, window), window); err != nil {
+			// A full window may come back with io.EOF at the file's end.
+			if k, _ := f.ReadAt(buf[:window], off); int64(k) < window {
 				return ""
 			}
+			h.Write(buf[:window])
 		}
 	}
 	return fmt.Sprintf("sample-v1:%x", h.Sum(nil))
 }
+
+var hashBufs = sync.Pool{New: func() any { return new([64 << 10]byte) }}
 
 // CallSource identifies a raw local request log without reading its contents.
 type CallSource struct {
@@ -1044,8 +1076,19 @@ type CallSource struct {
 	Modified         time.Time
 }
 
-func CallSources() []CallSource {
-	fs := callSources()
+func CallSources() []CallSource { return callSourcesOf(callSources()) }
+
+// CallSourcesAndCodexIdentities is CallSources and CodexIdentities from one
+// walk of the Codex folders. The Requests page asks for both on every
+// rebuild, and the walk lstat()s each rollout: twice over 12k rollouts was
+// ~150ms of each rebuild.
+func CallSourcesAndCodexIdentities() ([]CallSource, map[string]CodexIdentity) {
+	codex := codexFiles()
+	sources := callSourcesOf(callSourcesWith(codex))
+	return sources, codexIdentitiesOf(codex)
+}
+
+func callSourcesOf(fs []file) []CallSource {
 	pruneCalls(fs)
 	out := make([]CallSource, 0, len(fs))
 	for _, f := range fs {

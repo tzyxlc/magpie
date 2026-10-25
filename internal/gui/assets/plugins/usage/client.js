@@ -50,6 +50,7 @@ magpie.plugin("usage", (ctx) => {
     <div class="row-head" id="usageKeysHead" hidden><button class="fold" type="button" data-fold="keys" aria-expanded="true" aria-controls="usageKeys"><span class="label" data-t>Gateway keys</span></button></div>
     <div class="list" id="usageKeys" hidden></div>
     <p class="usage-note" id="usageNote"></p>
+    <div class="plugin-slot" data-slot="usage" hidden></div>
   </div>
   <div class="usage-pane" id="ledgerPane" hidden>
     <div class="sess-tools">
@@ -71,6 +72,7 @@ magpie.plugin("usage", (ctx) => {
       <section class="led-trend">
         <div class="led-bar">
           <div class="segs" id="ledMetric"></div>
+          <div class="segs led-style" id="ledStyle"></div>
           <span class="grow"></span>
           <span class="led-split"><span class="led-by" data-t>Split by</span><span class="segs" id="ledSplit"></span></span>
         </div>
@@ -136,5 +138,8 @@ magpie.plugin("usage", (ctx) => {
     reload() { return refreshUsage(true); },
     costs() { renderCosts(); },
     tab() { return usageTab; },
+    // the reader goes to another page: the Requests give back what a
+    // click lent them (ledLeave)
+    leave() { if (usageTab === "requests") ledLeave(); },
   });
 });

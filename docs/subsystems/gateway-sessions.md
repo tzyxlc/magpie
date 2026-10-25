@@ -40,7 +40,12 @@ by its prompt. `passOnCaller` sends the mark on to a remote magpie beside
 the session, and no vendor is sent either (`TestDshMarksSessionAndCompaction`).
 
 When the same identity is present in a native session, the native session wins
-and the gateway projection is omitted. Gateway projections have no path,
+and the gateway projection is omitted. On `/api/sessions/manage`, in its
+counts as in its list, and on `/api/sessions/delete`, a native session is any
+session file the agent keeps, one nothing was said in too, with no limit
+(`sessions.NativeIDs`); one pass over the agents' files (`sessions.Manage`)
+reads only the agent shown and the agents with gateway sessions (#2776).
+Gateway projections have no path,
 resume command or terminal action: the agent's own files of them are not on
 this computer. Their rows carry `gateway: true`; the Sessions page groups them
 under "Seen through the gateway" rather than "No folder", and their size is the
@@ -53,6 +58,18 @@ subagent whose session file is in a temp folder). Verification:
 `TestTopSessionsMarkWhatOnlyTheGatewaySaw`, `sessions-overview.test.cjs`. Their
 models, token totals, start/last timestamps and effective prices come from the
 same usage records used by Usage and stats endpoints.
+
+A model the user counts under another id (`usageAliases` in settings.json,
+`magpie model alias`; [`provider.UsageAlias`](../../internal/provider/usagealias.go))
+is merged after pricing, never before: `buildGatewaySessions` prices each
+record by its own model and keys its day and model rows by the alias, and
+`sessions.List`, `Get`, `Find` and the stats (`aliasStats` in
+[`alias.go`](../../internal/sessions/alias.go)) merge a native session's rows
+the same way, into new slices so the memo is never changed. The alias is read
+before any lock, and an unreadable settings.json keeps the last aliases read.
+Requests, the Requests ledger and model lists keep each call's own id.
+Verification: `TestUsageAliasCountsTwoIdsAsOne`,
+`TestSessionsCountAliasedModelsAsOne`, `TestAliasStatsLeavesItsInputAlone`.
 
 Claude Desktop gateway rows can have a local name even without a CLI
 transcript (#1675). [`DesktopTitles`](../../internal/sessions/desktop_titles.go)
@@ -444,9 +461,13 @@ for the session) and `start`/`last`; its file is never sent.
 - Claude Code, Qoder and Qoder CN: each `subagents/agent-<id>.jsonl` (and
   under `workflows/<run>/`), with `agentType`, `description` and
   `parentAgentId` from the meta file beside it (`ccMeta`). With no meta file
-  (Qoder), the title is the file's first user line (`ccTask`, at most 16
-  lines read). `agent-acompact-<id>.jsonl` is a compaction's own run and is
-  left out.
+  (Qoder), or one naming no `description`, the title is the file's first
+  user line (`ccTask`, at most 16 lines read). The file is read for it only
+  then, and what was read, a task or none, is kept until the file's size or
+  time changes; a read that fails keeps the last one. The size and time are
+  taken before the read, so a line written during it is read on the next
+  ask. `agent-acompact-<id>.jsonl` is a compaction's own run and is left
+  out.
 - OpenCode: a child session (`parent_id`, from the JSON store or
   `opencode.db`) is a subagent of its root, not a session of its own;
   `ocRoots` records its parent. Its title splits 1.x's
@@ -466,12 +487,17 @@ for the session) and `start`/`last`; its file is never sent.
   other system triggers, and any in `agents/main`, stay folded.
 
 These are read beside the parsed-session cache, not in it, so its version
-is unchanged. `GET /api/sessions/transcript` takes `sub=<id>` for a
+is unchanged. Only the Sessions list and a session's own lookups build
+them (`assemble`); the stats, the native-session keys, `Titles` and the
+id lookups use `assembleListed`, which stops before resume, transcript and
+subagents, so a stats poll reads no subagent's file.
+`GET /api/sessions/transcript` takes `sub=<id>` for a
 subagent's conversation; the id is looked up among the session's own
 `subagents` (`sessions.SubagentTranscript`), never used as a path, and one
 not listed is an error. See `TestClaudeSubagents`, `TestQoderSubagents`,
 `TestOpenCodeSubagents`, `TestOpenCodeV2SubagentKind`, `TestKimiSubagents`,
-`TestKimiSubagentTask` and
+`TestKimiSubagentTask`, `TestSubagentTaskReadOnlyWhenTheFileChanges`,
+`TestSubagentWithMetaTaskIsNotReadForIt`, `TestStatsReadNoSubagentFile` and
 `TestSessionSubagentTranscript`.
 
 The Sessions page draws only main sessions on top. A session's subagents are

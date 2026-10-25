@@ -74,7 +74,13 @@ type Record struct {
 	// kept has none: all its writes are counted as 5-minute ones, as they
 	// were.
 	CacheWrite1h int `json:"cache_write_1h,omitempty"`
-	Reasoning    int `json:"reasoning,omitempty"`
+	// CacheUnknown: the vendor counted no cache tokens for this call (a
+	// plugin's magpie_cache_unknown: Kiro caches but tells only credits),
+	// so its CacheRead of 0 is not a miss. A hit rate leaves its prompt
+	// out (Totals.CacheUnknown, #3464). A record from before it was kept
+	// has none: its 0 still reads as a miss.
+	CacheUnknown bool `json:"cache_unknown,omitempty"`
+	Reasoning    int  `json:"reasoning,omitempty"`
 	// Effort is the reasoning the model was asked for — a routing group's
 	// pick for the turn, or the agent's own — as it takes it; "" for none
 	Effort string `json:"effort,omitempty"`
@@ -394,10 +400,17 @@ type Totals struct {
 	CacheRead  int `json:"cache_read"`
 	CacheWrite int `json:"cache_write"`
 	// CacheWrite1h is how many of CacheWrite were 1-hour writes
-	CacheWrite1h int     `json:"cache_write_1h,omitempty"`
-	Reasoning    int     `json:"reasoning"`
-	Cost         float64 `json:"cost"`     // USD at the effective price, for the priced calls
-	Unpriced     int     `json:"unpriced"` // calls with tokens but no known price
+	CacheWrite1h int `json:"cache_write_1h,omitempty"`
+	// CacheUnknown is how many of the prompt's tokens (Input, CacheRead
+	// and CacheWrite) were of calls whose vendor counted no cache
+	// (Record.CacheUnknown), CacheUnknownCalls how many calls they were:
+	// a hit rate is CacheRead over the prompt less CacheUnknown, and none
+	// when nothing is left (#3464)
+	CacheUnknown      int     `json:"cache_unknown,omitempty"`
+	CacheUnknownCalls int     `json:"cache_unknown_calls,omitempty"`
+	Reasoning         int     `json:"reasoning"`
+	Cost              float64 `json:"cost"`     // USD at the effective price, for the priced calls
+	Unpriced          int     `json:"unpriced"` // calls with tokens but no known price
 	// Credits are what the vendors said Credited of the calls cost in
 	// their plans' own credits (Record.Credits): the rest said nothing
 	Credits  float64 `json:"credits,omitempty"`
@@ -594,6 +607,49 @@ func FormatCost(amountUSD float64, currency string, rate float64) string {
 	}
 }
 
+// countCache counts r's prompt as one whose cache wasn't counted when its
+// vendor said so, or never counts it (a record kept before it said so).
+func (t *Totals) countCache(r Record) {
+	if r.cacheNotCounted() {
+		t.CacheUnknown += r.cacheUnknownIn()
+		t.CacheUnknownCalls++
+	}
+}
+
+// CountsNoCache is whether a provider's vendor never counts cache tokens,
+// so a call of it with none recorded was not a miss: Kiro caches but tells
+// only credits. Calls kept before its plugin said so (opencode-kiro-auth
+// 0.1.16's magpie_cache_unknown) carry no CacheUnknown, and are read as
+// having it (#3464). The provider is the built-in's id, or the plugin's
+// own when it is signed in under that.
+func CountsNoCache(provider string) bool {
+	return provider == "kiro" || provider == "kiro-plugin"
+}
+
+// cacheNotCounted is whether r's vendor counted no cache for it: it said
+// so, or it never counts any and r has none (kept before it said so).
+func (r Record) cacheNotCounted() bool {
+	return r.CacheUnknown || r.CacheRead+r.CacheWrite == 0 && CountsNoCache(r.Provider)
+}
+
+// cacheUnknownIn is r's prompt when its vendor counted no cache, else 0.
+func (r Record) cacheUnknownIn() int {
+	if !r.cacheNotCounted() {
+		return 0
+	}
+	return r.Input + r.CacheRead + r.CacheWrite
+}
+
+// HitRate is the share of the prompt read from the cache, of the calls
+// whose vendor counted it; false when none did (#3464).
+func (t Totals) HitRate() (float64, bool) {
+	p := t.Input + t.CacheRead + t.CacheWrite - t.CacheUnknown
+	if p <= 0 {
+		return 0, false
+	}
+	return float64(t.CacheRead) / float64(p), true
+}
+
 func (t *Totals) add(r Record, price *catalog.Price) { t.addFrom(Row{Record: r}, price) }
 
 // addFrom is add for a ledger row, whose speed is told as Row.Decode tells
@@ -606,6 +662,7 @@ func (t *Totals) addFrom(row Row, price *catalog.Price) {
 	t.CacheRead += r.CacheRead
 	t.CacheWrite += r.CacheWrite
 	t.CacheWrite1h += r.CacheWrite1h
+	t.countCache(r)
 	t.Reasoning += r.Reasoning
 	if r.TTFT > 0 && !r.Failed() {
 		t.Timed++
@@ -801,6 +858,9 @@ func summarize(p Period, now time.Time, recs []Record) Summary {
 
 func summarizeFrom(p Period, now time.Time, first time.Time, historicalKeys map[string]bool, read func(func(Record))) Summary {
 	renamed := provider.Renamed()
+	// the names models' usage is counted under (SlouchyQuill507): a model's
+	// row sums its ids, each call priced by its own id first
+	alias := provider.UsageAlias()
 	normalizedKeys := map[string]bool{}
 	for id := range historicalKeys {
 		if next, ok := renamed[id]; ok {
@@ -886,13 +946,17 @@ func summarizeFrom(p Period, now time.Time, first time.Time, historicalKeys map[
 			agents[id] = a
 		}
 		a.add(r, pr)
-		k, host := r.Provider+"/"+r.Model, ""
+		model := r.Model
+		if alias != nil {
+			model = alias(model)
+		}
+		k, host := r.Provider+"/"+model, ""
 		if w := who(r.Host); w != "" && (len(hosts[r.Provider]) > 1 || w != goesNow[r.Provider]) {
 			k, host = k+" @ "+w, w
 		}
 		m := models[k]
 		if m == nil {
-			m = &Group{ID: k, Provider: r.Provider, Model: r.Model, Host: host}
+			m = &Group{ID: k, Provider: r.Provider, Model: model, Host: host}
 			models[k] = m
 		}
 		m.add(r, pr)
@@ -999,18 +1063,24 @@ type Via struct {
 
 // Vias is what the gateway sent each session's calls to since a time, by
 // agent id and the session's id ("codex|<id>"), the most calls first.
-func Vias(since time.Time) map[string][]Via {
+func Vias(since time.Time) ViaIndex {
 	return cachedVias(since)
 }
 
-func buildVias(snapshot *logSnapshot, since time.Time) map[string][]Via {
+func buildVias(snapshot *logSnapshot, since time.Time) *viaLists {
 	out := map[string][]Via{}
+	first := map[string]time.Time{}
+	keep := keptStrings{}
 	snapshot.visit(since, func(r Record) {
 		if r.IsRejected() || r.IsReported() || r.Session == "" || r.Model == "" {
 			return
 		}
+		r.Provider, r.Model, r.Effort = keep.of(r.Provider), keep.of(r.Model), keep.of(r.Effort)
 		k := ReportedAs(r.Agent) + "|" + r.Session
 		vs := out[k]
+		if t, seen := first[k]; !seen || r.Time.Before(t) {
+			first[k] = r.Time
+		}
 		i := slices.IndexFunc(vs, func(v Via) bool { return v.Provider == r.Provider && v.Model == r.Model && v.Effort == r.Effort })
 		if i < 0 {
 			vs, i = append(vs, Via{Provider: r.Provider, Model: r.Model, Effort: r.Effort}), len(vs)
@@ -1029,7 +1099,7 @@ func buildVias(snapshot *logSnapshot, since time.Time) map[string][]Via {
 	for _, vs := range out {
 		sort.SliceStable(vs, func(i, j int) bool { return vs[i].Calls > vs[j].Calls })
 	}
-	return out
+	return &viaLists{m: out, first: first}
 }
 
 // Saw notes a request from an agent arriving now.
