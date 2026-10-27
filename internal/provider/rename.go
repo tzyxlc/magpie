@@ -1,11 +1,17 @@
 package provider
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
+	"time"
+
+	"golang.org/x/net/publicsuffix"
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/settings"
@@ -58,11 +64,11 @@ func Rename(from, to string) error {
 	if slices.ContainsFunc(f.Providers, func(p Provider) bool { return p.ID == to }) {
 		return fmt.Errorf("there is a provider %q already", to)
 	}
-	// an id another provider once had is this one's now
-	for j := range f.Providers {
-		f.Providers[j].Was = slices.DeleteFunc(f.Providers[j].Was, func(w string) bool { return w == to })
-	}
+	// an id another provider once had is this one's now; the calls
+	// recorded under it until now stay that one's
+	giveID(f.Providers, i, to, time.Now())
 	p := &f.Providers[i]
+	p.Was = slices.DeleteFunc(p.Was, func(w string) bool { return w == to })
 	p.ID = to
 	// the subscription's id is the subscription's: an old ref to it isn't
 	// taken for this one
@@ -84,8 +90,8 @@ func Rename(from, to string) error {
 		for k, m := range g.Members {
 			g.Members[k] = renamedRef(m, from, to)
 		}
-		for k, r := range g.Rules {
-			g.Rules[k].Use = renamedRef(r.Use, from, to)
+		for k := range g.Rules {
+			g.Rules[k].MapUses(func(u string) string { return renamedRef(u, from, to) })
 		}
 		for k, m := range g.Fast {
 			g.Fast[k] = renamedRef(m, from, to)
@@ -146,15 +152,284 @@ func RenamedRef(ref string) string {
 	return ref
 }
 
-// Renamed maps the ids providers had to the ones they have now.
-func Renamed() map[string]string {
-	out := map[string]string{}
-	for _, p := range load().Providers {
-		for _, w := range p.Was {
-			out[w] = p.ID
+// Renamed maps the ids providers had to the ones they have now. An id
+// that a provider or a subscription has now is that one's, and is not
+// in it.
+func Renamed() map[string]string { return UsageRenames().now }
+
+// Gave is an id a provider had and gave up to another (Provider.Gave).
+type Gave struct {
+	ID    string    `json:"id"`
+	Until time.Time `json:"until"`
+}
+
+// Deleted is a provider the user deleted (Delete): the calls recorded
+// under its id, and under the ids it had (Was, Gave), until it was
+// deleted are its own, under its id while no other has taken it and
+// under UsageID once one has, never a provider's added later under the
+// same id. cybercaius on Discord: a provider deleted and
+// another added under its id showed as one on the Usage page.
+type Deleted struct {
+	ID   string    `json:"id"`
+	Name string    `json:"name,omitempty"`
+	Icon string    `json:"icon,omitempty"`
+	At   time.Time `json:"at"`
+	Was  []string  `json:"was,omitempty"`
+	Gave []Gave    `json:"gave,omitempty"`
+}
+
+// UsageID is the id its calls are counted under: its id and when it was
+// deleted, which no provider can take ("~" is never in one, Slug).
+func (d Deleted) UsageID() string { return d.ID + "~" + d.At.UTC().Format("20060102T150405") }
+
+// Renames say which provider a call recorded under a provider id was
+// made to, as its id is now: a provider renamed takes the calls recorded
+// under the ids it had (Was), and an id another provider took since
+// (Gave) is that one's only from then on (cybercaius on Discord: a
+// renamed provider's usage was shown under its old id and its new one).
+type Renames struct {
+	now  map[string]string
+	gave map[string][]gaveTo
+	// hosts are the providers by the host each is on, for magpie's own
+	// requests to a provider being added, which has no id yet (ProbeOf)
+	hosts map[string]string
+	// sites are the providers by the site (SiteOf) of each host they are
+	// on, "" for a site two are on: a model list asked at a provider's
+	// bare domain before it was saved on its api. subdomain (OnSite)
+	sites map[string]string
+	// gone are the deleted providers by UsageID
+	gone map[string]Deleted
+}
+
+type gaveTo struct {
+	Until time.Time `json:"until"`
+	To    string    `json:"to"`
+}
+
+// Of is the id the provider a call recorded under id at the time at has
+// now; id itself when it was not renamed. A zero at is before every
+// hand-over.
+func (r Renames) Of(id string, at time.Time) string {
+	for _, g := range r.gave[id] {
+		if at.Before(g.Until) {
+			return g.To
 		}
 	}
-	return out
+	if to, ok := r.now[id]; ok {
+		return to
+	}
+	return id
+}
+
+// ProbeOf is Of for one of magpie's own requests (probelog): one sent
+// while a provider was being added, its Detect or Test before it had an
+// id, is recorded under its host, and is the provider's on that host now.
+// yyddbds on Discord: 大灰狼, on dahuilang.best, was listed twice in the
+// Requests page's providers, once as dahuilang.best for the model lists
+// asked while adding it. A host two providers are on, or none, stays as
+// it is.
+func (r Renames) ProbeOf(id string, at time.Time) string {
+	if to := r.hosts[strings.ToLower(id)]; to != "" {
+		return to
+	}
+	return r.Of(id, at)
+}
+
+// OnHost is whether a provider saved now is on host, one or more.
+func (r Renames) OnHost(host string) bool {
+	_, ok := r.hosts[strings.ToLower(host)]
+	return ok
+}
+
+// OnSite is the provider saved now on a host of host's site (SiteOf),
+// for a probe recorded under a host no provider is on: CyberCaius on
+// Discord, Leee's model list was asked at leee.baby before it was saved
+// on another host of that site, and the Usage page listed leee.baby
+// beside it. on is whether any provider is on that site; id is "" when
+// two are, or host has no site.
+func (r Renames) OnSite(host string) (id string, on bool) {
+	site := SiteOf(host)
+	if site == "" {
+		return "", false
+	}
+	id, on = r.sites[site]
+	return id, on
+}
+
+// SiteOf is the registrable domain of host (a URL's host, with or without
+// its port), lowercased: api.leee.baby:443 is leee.baby. A host on a
+// public suffix's own names (a.vercel.app is vercel.app's tenant a), an
+// address or a name with no suffix (localhost) has none, "".
+func SiteOf(host string) string {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if i := strings.LastIndex(h, ":"); i >= 0 && !strings.Contains(h[i+1:], "]") && strings.Count(h, ":") == 1 {
+		h = h[:i]
+	}
+	h = strings.TrimSuffix(h, ".")
+	if h == "" || strings.ContainsAny(h, ":[]") || net.ParseIP(h) != nil || !strings.Contains(h, ".") {
+		return ""
+	}
+	site, err := publicsuffix.EffectiveTLDPlusOne(h)
+	if err != nil {
+		return ""
+	}
+	return site
+}
+
+// Gone is the deleted provider whose calls are counted under id: its
+// own id while no provider has it, or its UsageID.
+func (r Renames) Gone(id string) (Deleted, bool) {
+	d, ok := r.gone[id]
+	return d, ok
+}
+
+// Timed is whether the id's calls go to more than one provider by when
+// they were made, so Of needs each call's time.
+func (r Renames) Timed(id string) bool { return len(r.gave[id]) > 0 }
+
+// Each is every id a call recorded under id can go to (Of), by when it
+// was made.
+func (r Renames) Each(id string) []string {
+	out := []string{r.Of(id, time.Time{})}
+	for _, g := range r.gave[id] {
+		out = append(out, g.To)
+	}
+	out = append(out, r.Of(id, time.Now().Add(100*365*24*time.Hour)))
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// RenamesOf are renames of ids to the ones they are now, none given away
+// (for a test).
+func RenamesOf(now map[string]string) Renames { return Renames{now: now} }
+
+// Empty is whether no id is renamed.
+func (r Renames) Empty() bool { return len(r.now) == 0 && len(r.gave) == 0 }
+
+// Key is r as text, for a cache of what was worked out with it.
+func (r Renames) Key() string {
+	b, _ := json.Marshal([]any{r.now, r.gave})
+	return string(b)
+}
+
+// lastRenames are the renames last read, kept for when providers.json
+// can't be read: a failed read is not "nothing renamed", and the usage of
+// every renamed provider would be shown split until it read again.
+var lastRenames atomic.Pointer[Renames]
+
+// UsageRenames are the renames of providers.json as it is now.
+func UsageRenames() Renames {
+	f, err := read()
+	if err != nil {
+		if r := lastRenames.Load(); r != nil {
+			return *r
+		}
+		return Renames{now: map[string]string{}}
+	}
+	r := renamesOf(f.Providers, f.Deleted)
+	lastRenames.Store(&r)
+	return r
+}
+
+func renamesOf(ps []Provider, deleted []Deleted) Renames {
+	r := Renames{now: map[string]string{}}
+	held := map[string]bool{}
+	for _, p := range ps {
+		held[p.ID] = true
+	}
+	give := func(id string, until time.Time, to string) {
+		if r.gave == nil {
+			r.gave = map[string][]gaveTo{}
+		}
+		r.gave[id] = append(r.gave[id], gaveTo{until, to})
+	}
+	for i, d := range deleted {
+		// its calls stay under its id until a provider is added under it,
+		// deleted since or there now
+		to := d.ID
+		if held[d.ID] || slices.ContainsFunc(deleted[i+1:], func(l Deleted) bool { return l.ID == d.ID || slices.Contains(l.Was, d.ID) }) {
+			to = d.UsageID()
+		}
+		if r.gone == nil {
+			r.gone = map[string]Deleted{}
+		}
+		r.gone[to] = d
+		if to != d.ID {
+			give(d.ID, d.At, to)
+		}
+		for _, w := range d.Was {
+			// the subscription's id is the subscription's (Rename)
+			if !subscriptionID(w) {
+				give(w, d.At, to)
+			}
+		}
+		for _, g := range d.Gave {
+			give(g.ID, g.Until, to)
+		}
+	}
+	for _, p := range ps {
+		for _, w := range p.Was {
+			// the subscription's id is the subscription's (Rename)
+			if !held[w] && !subscriptionID(w) {
+				r.now[w] = p.ID
+			}
+		}
+		for _, g := range p.Gave {
+			give(g.ID, g.Until, p.ID)
+		}
+	}
+	for _, gs := range r.gave {
+		slices.SortStableFunc(gs, func(a, b gaveTo) int { return a.Until.Compare(b.Until) })
+	}
+	for _, p := range ps {
+		if p.Hidden {
+			continue
+		}
+		for _, u := range []string{p.Chat, p.Responses, p.Anthropic, p.Gemini, p.Decide} {
+			h := HostOf(u)
+			// a provider's id (one stored by hand can have a dot, b.ai)
+			// is that provider's, never a host's
+			if h == "" || held[h] {
+				continue
+			}
+			if r.hosts == nil {
+				r.hosts = map[string]string{}
+			}
+			if to, ok := r.hosts[h]; ok && to != p.ID {
+				r.hosts[h] = "" // two providers on it: which one is unknown
+				continue
+			}
+			r.hosts[h] = p.ID
+		}
+	}
+	for h, id := range r.hosts {
+		site := SiteOf(h)
+		if site == "" {
+			continue
+		}
+		if r.sites == nil {
+			r.sites = map[string]string{}
+		}
+		if to, ok := r.sites[site]; ok && to != id {
+			id = "" // two providers on it, or a host two are on
+		}
+		r.sites[site] = id
+	}
+	return r
+}
+
+// giveID moves id out of the Was of every provider of ps but ps[taker]
+// (-1 for one not among them) into its Gave at now: from now on id is
+// another's, and what was recorded under it before stays the one's that
+// had it.
+func giveID(ps []Provider, taker int, id string, now time.Time) {
+	for j := range ps {
+		if j == taker || !slices.Contains(ps[j].Was, id) {
+			continue
+		}
+		ps[j].Was = slices.DeleteFunc(ps[j].Was, func(w string) bool { return w == id })
+		ps[j].Gave = append(ps[j].Gave, Gave{ID: id, Until: now})
+	}
 }
 
 // OnAccountIDs are the user's own providers saved on a subscription's id,

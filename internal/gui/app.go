@@ -22,6 +22,7 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/autostart"
+	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/omarchy"
 	"github.com/yetone/magpie/internal/proc"
@@ -353,8 +354,11 @@ func Run(version string, showMain bool, link string) error {
 	zoom := h.zoom()
 	go stats.Run(version, "app")
 	handler := devShell(h)
-	if handler == nil {
-		handler = Handler(h, startBackend())
+	ownPage := handler == nil
+	var gw *gateway.Server
+	if ownPage {
+		gw = startBackend()
+		handler = Handler(h, gw)
 	}
 	// Linux: the magpie before holds the app's D-Bus name until it quits,
 	// once it has finished its requests; this one serves the gateway
@@ -430,8 +434,9 @@ func Run(version string, showMain bool, link string) error {
 	watchHide()
 	// The Dock icon opens the window, or goes to it where it is open. Wails
 	// would show every hidden window on it, the panel too, so the hook
-	// answers first and stops it.
+	// answers first and stops it. The icon flaps as the header logo does.
 	h.app.Event.RegisterApplicationEventHook(events.Mac.ApplicationShouldHandleReopen, func(e *application.ApplicationEvent) {
+		go dockFlap()
 		application.InvokeSync(h.reopenMain)
 		e.Cancel()
 	})
@@ -625,6 +630,10 @@ func Run(version string, showMain bool, link string) error {
 	// GTK 3 with no font DPI set would lay every page out at a negative
 	// width (#1371); give it one before the first webview is made.
 	fontDPI()
+	// the page to a browser too, where Settings says (apppage.go)
+	if ownPage {
+		startAppPage(h, gw)
+	}
 	return h.app.Run()
 }
 

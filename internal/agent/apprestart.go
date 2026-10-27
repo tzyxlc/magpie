@@ -216,14 +216,17 @@ func (a *Agent) AppBehind() *AppRun {
 
 // appReads are the files the agent's desktop app reads magpie's part from
 // at start, and that part. Claude Desktop: deploymentMode, the profile
-// applied and magpie's profile, with the models the gateway lists it.
-// WorkBuddy: its models.json.
+// applied and magpie's profile (or the user's for magpie's gateway), with the models the gateway lists it.
+// WorkBuddy: magpie's models in its models.json (workbuddyPart).
 func (a *Agent) appReads() (files []string, reads func() string) {
 	switch a.ID {
 	case "claude-desktop":
 		ps := desktopSetsHere()
 		for _, p := range ps {
 			files = append(files, p.config, p.config3p, p.meta, p.prof)
+			if f := desktopAppliedGateway(p); f != "" {
+				files = append(files, f)
+			}
 		}
 		return files, func() string {
 			var b strings.Builder
@@ -235,6 +238,13 @@ func (a *Agent) appReads() (files []string, reads func() string) {
 				b.WriteString(m + "\n" + m3 + "\n" + id + "\n")
 				b.Write(prof)
 				b.WriteString("\n")
+				// a profile of the user's for magpie's gateway, applied
+				// instead of magpie's (desktopKeyApplied)
+				if f := desktopAppliedGateway(p); f != "" {
+					theirs, _ := edit.Read(f)
+					b.Write(theirs)
+					b.WriteString("\n")
+				}
 			}
 			shown, _ := provider.CatalogFor(a.ListsFor())
 			for _, e := range shown {
@@ -243,10 +253,7 @@ func (a *Agent) appReads() (files []string, reads func() string) {
 			return b.String()
 		}
 	case "workbuddy", "workbuddy-ai":
-		return []string{a.Path}, func() string {
-			c, _ := edit.Read(a.Path)
-			return string(c)
-		}
+		return []string{a.Path}, func() string { return workbuddyPart(a.Path) }
 	}
 	return nil, nil
 }

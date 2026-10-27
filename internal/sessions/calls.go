@@ -69,14 +69,16 @@ type callFile struct {
 	Claude      *claudeUsageState
 	ContentHash string
 	dirty       map[int]bool
-	Size        int64
-	Mod         int64  // unix nanoseconds
-	Off         int64  // after the last whole line read
-	Head        string // hash of the prefix, to tell one replaced from one grown
-	HeadSize    int
-	Path        string
-	Calls       []Call
-	Agent       string
+	// bigFrame: read from a frame of more than framePatches (loadCalls)
+	bigFrame bool
+	Size     int64
+	Mod      int64  // unix nanoseconds
+	Off      int64  // after the last whole line read
+	Head     string // hash of the prefix, to tell one replaced from one grown
+	HeadSize int
+	Path     string
+	Calls    []Call
+	Agent    string
 	// where the line being handled begins and ends, and where the last reply's did
 	At, End, AsstEnd int64
 	Strs             map[string]string
@@ -290,9 +292,24 @@ func callFiles() []file { return callFilesWith(codexFiles()) }
 
 // callFilesWith is callFiles with codex the rollouts codexFiles found.
 func callFilesWith(codex []file) []file {
-	var out []file
-	seen := map[string]bool{}
-	add := func(fs []file) {
+	lists := [][]file{ccFiles("claude", ClaudeDir())}
+	for _, d := range callDesktopDirs() {
+		// Cowork keeps a Claude Code folder of its own for each session
+		homes, _ := SessionGlob(filepath.Join(d, "local-agent-mode-sessions", "*", "*", "local_*", ".claude"))
+		for _, h := range homes {
+			lists = append(lists, ccFiles("claude-desktop", h))
+		}
+	}
+	lists = append(lists, codex, wslFiles("claude", "codex"))
+	// sized once: a file is ~200 bytes, and growing a list of ~20k of them
+	// on every 15 s poll was ~36 MB a read
+	n := 0
+	for _, fs := range lists {
+		n += len(fs)
+	}
+	out := make([]file, 0, n)
+	seen := make(map[string]bool, n)
+	for _, fs := range lists {
 		for _, f := range fs {
 			if !seen[f.path] {
 				seen[f.path] = true
@@ -300,16 +317,6 @@ func callFilesWith(codex []file) []file {
 			}
 		}
 	}
-	add(ccFiles("claude", ClaudeDir()))
-	for _, d := range callDesktopDirs() {
-		// Cowork keeps a Claude Code folder of its own for each session
-		homes, _ := SessionGlob(filepath.Join(d, "local-agent-mode-sessions", "*", "*", "local_*", ".claude"))
-		for _, h := range homes {
-			add(ccFiles("claude-desktop", h))
-		}
-	}
-	add(codex)
-	add(wslFiles("claude", "codex"))
 	return out
 }
 
@@ -362,7 +369,9 @@ func headOf(path string) string {
 }
 
 // prepareCalls clones the continuation so a published index is never changed.
-func prepareCalls(f file, old *callFile) *callFile {
+// owned: old was read from disk for this read alone (loadKept), so its
+// calls are taken as they are rather than copied for st.
+func prepareCalls(f file, old *callFile, owned bool) *callFile {
 	// The disk shard stores final calls, not a second copy of every usage
 	// observation. Rebuild continuation only when a cold source grows.
 	if f.agent == "codex" && old != nil && (old.CX == nil || old.CX.Usage == nil) {
@@ -377,7 +386,11 @@ func prepareCalls(f file, old *callFile) *callFile {
 	head := headOf(f.path)
 	var st *callFile
 	if old != nil && !packed(f.path) && f.size >= old.Size && old.Off <= f.size && sameHead(head, old.Head, old.HeadSize) && old.ContentHash != "" && prefixHash(f.path, old.Off) == old.ContentHash {
-		st = old.clone()
+		if owned {
+			st = old.cloneState()
+		} else {
+			st = old.clone()
+		}
 	} else {
 		st = &callFile{Agent: f.agent}
 		if f.agent == "codex" {
@@ -396,10 +409,21 @@ func prepareCalls(f file, old *callFile) *callFile {
 }
 
 func (st *callFile) clone() *callFile {
-	c := *st
+	c := st.cloneState()
 	c.Calls = append([]Call(nil), st.Calls...)
-	c.Claude = st.Claude.clone()
 	c.Msgs, c.Began, c.Strs = maps.Clone(st.Msgs), maps.Clone(st.Began), maps.Clone(st.Strs)
+	return c
+}
+
+// cloneState is a copy of st's reading state that shares its calls, and
+// their Msgs, Began and Strs. The state may be a kept continuation's
+// (restoreCallContinuation), so it is copied; the calls of a file just
+// read from disk have no other reader, and copying them on every change
+// of a live session was 160 MB of eight Requests polls (of 3.9 GB) on
+// real history.
+func (st *callFile) cloneState() *callFile {
+	c := *st
+	c.Claude = st.Claude.clone()
 	if st.CX != nil {
 		r := *st.CX
 		r.Turns = maps.Clone(r.Turns)
@@ -450,11 +474,89 @@ func callHead(st *callFile, b []byte) bool {
 		return false
 	}
 	compacted := typeAfter(b[:min(len(b), 1024)], cxType) == "compacted"
-	if !compacted && (bytes.Contains(b, cxUserMsg) || bytes.Contains(b, cxUserRole) || bytes.Contains(b, cxToolOut) || bytes.Contains(b, cxCustomOut)) {
+	m := cxMarksOf(b)
+	if !compacted && m&cxInput != 0 {
 		codexCallLine(st, b)
 		return false
 	}
-	return bytes.Contains(b, cxMeta) || bytes.Contains(b, cxTurn) || bytes.Contains(b, cxRecord) || bytes.Contains(b, cxCompacted) || bytes.Contains(b, cxCount) || bytes.Contains(b, cxSettings) || bytes.Contains(b, cxStarted) || bytes.Contains(b, cxDone)
+	return m&cxFollowed != 0
+}
+
+// cxMarks are the "type" values a rollout line holds anywhere in it that
+// codexCallLine follows, and whether an object in it has the user's role.
+type cxMarks uint16
+
+const (
+	cxMarkUserMsg cxMarks = 1 << iota
+	cxMarkUserRole
+	cxMarkToolOut
+	cxMarkMeta
+	cxMarkTurn
+	cxMarkRecord
+	cxMarkCompacted
+	cxMarkCount
+	cxMarkSettings
+	cxMarkStarted
+	cxMarkDone
+
+	// what the model is given: the prompt, a tool's output
+	cxInput = cxMarkUserMsg | cxMarkUserRole | cxMarkToolOut
+	// the lines codexCallLine reads whole
+	cxFollowed = cxMarkMeta | cxMarkTurn | cxMarkRecord | cxMarkCompacted | cxMarkCount | cxMarkSettings | cxMarkStarted | cxMarkDone
+)
+
+var (
+	cxKeyEnd   = []byte(`":"`)
+	cxTypeKey  = []byte(`"type`)
+	cxRoleKey  = []byte(`"role`)
+	cxUserName = []byte(`user"`)
+)
+
+// cxMarksOf reads b's marks in one pass: every `"type":"<v>"` and
+// `"role":"user"` that a bytes.Contains of each would find, as one each
+// had been (up to twelve passes over a line of megabytes, most of a cold
+// usage read's CPU on Windows, #3493). In a JSON string the quotes are
+// escaped, so the `":"` ending a key is never inside one.
+func cxMarksOf(b []byte) (m cxMarks) {
+	for {
+		i := bytes.Index(b, cxKeyEnd)
+		if i < 0 {
+			return m
+		}
+		key, val := b[:i], b[i+len(cxKeyEnd):]
+		b = val
+		switch {
+		case bytes.HasSuffix(key, cxTypeKey):
+			j := bytes.IndexByte(val, '"')
+			if j < 0 {
+				return m
+			}
+			switch string(val[:j]) {
+			case "user_message":
+				m |= cxMarkUserMsg
+			case "function_call_output", "custom_tool_call_output":
+				m |= cxMarkToolOut
+			case "session_meta":
+				m |= cxMarkMeta
+			case "turn_context":
+				m |= cxMarkTurn
+			case "token_usage_record":
+				m |= cxMarkRecord
+			case "compacted":
+				m |= cxMarkCompacted
+			case "token_count":
+				m |= cxMarkCount
+			case "thread_settings_applied":
+				m |= cxMarkSettings
+			case "task_started":
+				m |= cxMarkStarted
+			case "task_complete":
+				m |= cxMarkDone
+			}
+		case bytes.HasSuffix(key, cxRoleKey) && bytes.HasPrefix(val, cxUserName):
+			m |= cxMarkUserRole
+		}
+	}
 }
 
 // sessionOfPath is the session a Claude Code file belongs to by its name:
@@ -741,13 +843,10 @@ func firstChars(s string, n int) string {
 }
 
 var (
-	ccIdentity  = []byte(`"identity":{"modelId":"`)
-	ccUserLine  = []byte(`"type":"user"`)
-	ccCompact   = []byte(`"subtype":"compact_boundary"`)
-	cxToolOut   = []byte(`"type":"function_call_output"`)
-	cxCustomOut = []byte(`"type":"custom_tool_call_output"`)
-	cxStarted   = []byte(`"type":"task_started"`)
-	cxDone      = []byte(`"type":"task_complete"`)
+	ccIdentity = []byte(`"identity":{"modelId":"`)
+	ccUserLine = []byte(`"type":"user"`)
+	ccCompact  = []byte(`"subtype":"compact_boundary"`)
+	cxStarted  = []byte(`"type":"task_started"`)
 )
 
 // cxCall is a line of a Codex rollout that says something about calls.
@@ -805,18 +904,21 @@ func codexCallLine(st *callFile, b []byte) {
 		st.codexChanged(r.Usage.compacted(tsAt(b, false), r.Model, cxCompactionIn(b)))
 		return
 	}
-	if bytes.Contains(b, cxUserMsg) || bytes.Contains(b, cxUserRole) || bytes.Contains(b, cxToolOut) || bytes.Contains(b, cxCustomOut) {
+	m := cxMarksOf(b)
+	if m&cxInput != 0 {
 		if at := tsAt(b, false); !at.IsZero() {
 			r.LastIn = at
-			if bytes.Contains(b, cxUserMsg) || bytes.Contains(b, cxUserRole) {
+			if m&(cxMarkUserMsg|cxMarkUserRole) != 0 {
 				r.Usage.Pending = 0
 			}
 			r.saveContext()
 		}
 		return
 	}
-	if !(!r.Meta && bytes.Contains(b, cxMeta) || bytes.Contains(b, cxTurn) || bytes.Contains(b, cxRecord) || bytes.Contains(b, cxCompacted) || bytes.Contains(b, cxCount) ||
-		bytes.Contains(b, cxSettings) || bytes.Contains(b, cxStarted) || bytes.Contains(b, cxDone)) {
+	if r.Meta {
+		m &^= cxMarkMeta
+	}
+	if m&cxFollowed == 0 {
 		return
 	}
 	var l cxCall

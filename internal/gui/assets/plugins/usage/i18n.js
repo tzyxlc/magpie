@@ -2,6 +2,7 @@
 // kernel adds them to i18n.js's (magpie.strings).
 magpie.strings({
   zh: {
+    "Deleted {date}": "{date} 已删除",
     "Bar chart": "柱状图",
     "Line chart": "折线图",
     "Chart style": "图表样式",
@@ -45,6 +46,7 @@ magpie.strings({
     "{n} cache read": "缓存读取 {n}",
     "reported by apps": "由应用上报",
     "Reported by the app that made it, through POST /v1/magpie/usage/requests: the call went straight to its vendor, not through magpie.": "由发起请求的应用通过 POST /v1/magpie/usage/requests 上报：这次请求直接发给了服务商，没有经过 magpie。",
+    "magpie sent this itself to test the provider (Test, Detect APIs or a model list), not for an agent. It is not counted in any total.": "这是 magpie 自己为测试供应商发出的请求（测试、检测协议或模型列表），不是 agent 发出的，不计入任何汇总。",
     "all requests": "全部请求",
     "Show only these requests": "只看这些请求",
     "Show every request again": "重新显示全部请求",
@@ -203,6 +205,7 @@ magpie.strings({
     "Sent upstream as {to}, as the agent spoke it": "以 {to} 协议发往上游，与 agent 所用协议相同",
   },
   "zh-TW": {
+    "Deleted {date}": "{date} 已刪除",
     "Bar chart": "長條圖",
     "Line chart": "折線圖",
     "Chart style": "圖表樣式",
@@ -246,6 +249,7 @@ magpie.strings({
     "{n} cache read": "快取讀取 {n}",
     "reported by apps": "由應用程式回報",
     "Reported by the app that made it, through POST /v1/magpie/usage/requests: the call went straight to its vendor, not through magpie.": "由發出請求的應用程式透過 POST /v1/magpie/usage/requests 回報：這次請求直接送往服務商，沒有經過 magpie。",
+    "magpie sent this itself to test the provider (Test, Detect APIs or a model list), not for an agent. It is not counted in any total.": "這是 magpie 自己為測試供應商發出的請求（測試、檢測協議或模型列表），不是 agent 發出的，不計入任何彙總。",
     "all requests": "全部請求",
     "Show only these requests": "只看這些請求",
     "Show every request again": "重新顯示全部請求",
@@ -404,6 +408,7 @@ magpie.strings({
     "Sent upstream as {to}, as the agent spoke it": "以 {to} 協議發往上游，與 agent 所用協議相同",
   },
   ja: {
+    "Deleted {date}": "{date} に削除",
     "Bar chart": "棒グラフ",
     "Line chart": "折れ線グラフ",
     "Chart style": "グラフの種類",
@@ -447,6 +452,7 @@ magpie.strings({
     "{n} cache read": "キャッシュ読み取り {n}",
     "reported by apps": "アプリからの報告",
     "Reported by the app that made it, through POST /v1/magpie/usage/requests: the call went straight to its vendor, not through magpie.": "リクエストを送ったアプリが POST /v1/magpie/usage/requests で報告したものです。このリクエストは magpie を経由せず、直接ベンダーに送られました。",
+    "magpie sent this itself to test the provider (Test, Detect APIs or a model list), not for an agent. It is not counted in any total.": "プロバイダをテストするために magpie 自身が送ったリクエストです（テスト、API を検出、モデル一覧）。エージェントのものではなく、どの合計にも数えません。",
     "all requests": "すべてのリクエスト",
     "Show only these requests": "これらのリクエストだけを表示",
     "Show every request again": "すべてのリクエストを再表示",
@@ -605,6 +611,7 @@ magpie.strings({
     "Sent upstream as {to}, as the agent spoke it": "エージェントと同じ {to} で上流へ送信",
   },
   de: {
+    "Deleted {date}": "Gelöscht am {date}",
     "Bar chart": "Balkendiagramm",
     "Line chart": "Liniendiagramm",
     "Chart style": "Diagrammart",
@@ -648,6 +655,7 @@ magpie.strings({
     "{n} cache read": "{n} Cache-Lesen",
     "reported by apps": "von Apps gemeldet",
     "Reported by the app that made it, through POST /v1/magpie/usage/requests: the call went straight to its vendor, not through magpie.": "Von der App gemeldet, die die Anfrage gestellt hat (POST /v1/magpie/usage/requests): Die Anfrage ging direkt an den Anbieter, nicht über magpie.",
+    "magpie sent this itself to test the provider (Test, Detect APIs or a model list), not for an agent. It is not counted in any total.": "magpie hat dies selbst gesendet, um den Anbieter zu testen (Testen, APIs erkennen oder eine Modellliste), nicht für einen Agent. Es zählt in keiner Summe.",
     "all requests": "alle Anfragen",
     "Show only these requests": "Nur diese Anfragen zeigen",
     "Show every request again": "Wieder alle Anfragen zeigen",

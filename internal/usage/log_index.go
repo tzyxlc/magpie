@@ -14,6 +14,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -48,6 +49,15 @@ type logSnapshot struct {
 	// reach back to a subscription window's start.
 	firstOwn     time.Time
 	keyProviders map[string]bool
+	// probes are the requests magpie sent on its own (SourceProbe), kept
+	// out of blocks: every reader of those counts what it reads, and the
+	// request log alone lists these (queryPage)
+	probes []probeRow
+	// hosts are the providers by the host their calls went to, as the log
+	// recorded them: "" for a host two providers were on. A probe made
+	// while a provider was being added, under its host, is that
+	// provider's after it is deleted too (probeChunk; cybercaius).
+	hosts map[string]string
 }
 
 var logIndex struct {
@@ -65,6 +75,24 @@ var logAppends struct {
 	sync.Mutex
 	path       string
 	base, last os.FileInfo
+}
+
+// sawHost notes the provider r's call went to by its host. A probe made
+// before its provider had an id names the host for both, and says nothing.
+func (s *logSnapshot) sawHost(r Record) {
+	h, _, _ := strings.Cut(r.Host, " as ") // a subscription's "host as user"
+	h = strings.ToLower(strings.TrimSpace(h))
+	if h == "" || r.Provider == "" || strings.EqualFold(r.Provider, h) || r.IsRejected() {
+		return
+	}
+	if s.hosts == nil {
+		s.hosts = map[string]string{}
+	}
+	if to, ok := s.hosts[h]; !ok {
+		s.hosts[h] = r.Provider
+	} else if to != r.Provider {
+		s.hosts[h] = ""
+	}
 }
 
 func readLogSnapshot() *logSnapshot {
@@ -99,7 +127,7 @@ func readLogSnapshot() *logSnapshot {
 		logIndex.version++
 	}
 
-	next := &logSnapshot{path: path, info: info, settled: settled, version: logIndex.version, keyProviders: map[string]bool{}}
+	next := &logSnapshot{path: path, info: info, settled: settled, version: logIndex.version, keyProviders: map[string]bool{}, hosts: map[string]string{}}
 	if err != nil {
 		logIndex.snapshot = next
 		return next
@@ -116,6 +144,8 @@ func readLogSnapshot() *logSnapshot {
 		next.off, next.first, next.firstOwn = old.off, old.first, old.firstOwn
 		next.blocks = slices.Clone(old.blocks)
 		next.keyProviders = maps.Clone(old.keyProviders)
+		next.probes = slices.Clip(old.probes) // appended to, never written in
+		next.hosts = maps.Clone(old.hosts)
 	}
 	logIndex.reads++
 	f, err := os.Open(path)
@@ -145,6 +175,11 @@ func readLogSnapshot() *logSnapshot {
 		sum.Write(b)
 		var r Record
 		if json.Unmarshal(b, &r) != nil {
+			continue
+		}
+		next.sawHost(r)
+		if r.IsProbe() {
+			next.probes = append(next.probes, probeRow{r, next.off})
 			continue
 		}
 		if tail == nil {
@@ -263,7 +298,9 @@ func (c *rowChunk) freeze() *rowChunk {
 		c.Bytes -= int64(32 * len(c.Strings))
 	}
 	c.shapeIDs = nil
-	return c.pack()
+	c = c.pack()
+	c.serial = nextChunkSerial()
+	return c
 }
 
 func resumeLogHash(h hash.Hash, state []byte) bool {

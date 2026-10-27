@@ -14,6 +14,8 @@ function fixture(lang, theme, events, options = {}) {
     { id: "server", name: "Server", masked: "sk-magpie-key-…222222" },
     { id: "work", name: "Work", masked: "sk-magpie-key-…333333" },
   ];
+  // options.keys is the test's own list: [] for the empty Gateway keys
+  if (options.keys) keys = options.keys;
   for (const k of keys) {
     if (options.limits?.[k.id]) Object.assign(k, options.limits[k.id]);
     if (options.keyHolds?.[k.id]) Object.assign(k, options.keyHolds[k.id]);
@@ -55,7 +57,10 @@ function fixture(lang, theme, events, options = {}) {
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
     const json = (data) => route.fulfill({ json: data });
-    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = ${JSON.stringify({ lang, theme, web: !!options.web })};` });
+    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = ${JSON.stringify({ lang, theme, web: !!options.web,
+      // with options.publicURL, where this process's gateway listens, as
+      // magpie's boot.js says it, MAGPIE_PUBLIC_URL with it while shared
+      ...(options.publicURL ? { sideGateway: { url: "http://127.0.0.1:3999", running: true, boot: true, ...publicURL() } } : {}) })};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/favicon.ico") return route.fulfill({ status: 204 });
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang, theme } });
@@ -88,6 +93,8 @@ function fixture(lang, theme, events, options = {}) {
       }
       return json(lanState());
     }
+    // options.keysError: the list can't be read
+    if (url.pathname === "/api/caller-keys" && options.keysError) return route.fulfill({ status: 500, json: { error: options.keysError } });
     if (url.pathname === "/api/caller-keys") return json({ keys });
     if (url.pathname === "/api/caller-keys/models") return json({ models: [
       ...(options.groups ? [

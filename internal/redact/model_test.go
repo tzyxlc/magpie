@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -28,7 +29,7 @@ func (f *fakeModel) find(texts []string) [][]Found {
 				if a > 0 && t[a-1] == ' ' {
 					a--
 				}
-				out[i] = append(out[i], Found{a, at + j + len(v), label})
+				out[i] = append(out[i], Found{Start: a, End: at + j + len(v), Label: label})
 				at += j + len(v)
 			}
 		}
@@ -103,10 +104,31 @@ func TestModelSpansFiltered(t *testing.T) {
 	}
 	// a span outside the text, or splitting a character, is no span
 	bad := func([]string) [][]Found {
-		return [][]Found{{{-1, 3, "secret"}, {0, 99, "secret"}, {1, 4, "private_person"}}}
+		return [][]Found{{{Start: -1, End: 3, Label: "secret"}, {Start: 0, End: 99, Label: "secret"}, {Start: 1, End: 4, Label: "private_person"}}}
 	}
 	if out, _ := Mask("é名字abc", Options{Personal: true, Secrets: true, Model: bad}); out != "é名字abc" {
 		t.Fatalf("bad spans: %q", out)
+	}
+}
+
+// A span the model starts at the delimiter before a value is the value's:
+// a phone number in JSON or a CSV row is masked, and the delimiter goes as
+// written (#3591, from the evaluation's json-contact and tool-result-mixed).
+func TestModelSpanLeavesDelimiters(t *testing.T) {
+	f := &fakeModel{values: map[string]string{
+		`":"+86 139 1234 5678`: "private_phone",
+		`,+81 90-1234-5678`:    "private_phone",
+		`,rina.k@fastmail.com`: "private_email",
+		`"Wei Zhang"`:          "private_person",
+	}}
+	o := Options{Personal: true, Model: f.find}
+	for _, c := range []struct{ in, want string }{
+		{`{"name":"Wei Zhang","phone":"+86 139 1234 5678"}`, `^\{"name":"\{\{PERSON_[a-z2-7]{8}\}\}","phone":"\{\{PHONE_[a-z2-7]{8}\}\}"\}$`},
+		{"Rina,rina.k@fastmail.com,+81 90-1234-5678\n", `^Rina,\{\{EMAIL_[a-z2-7]{8}\}\},\{\{PHONE_[a-z2-7]{8}\}\}\n$`},
+	} {
+		if out, _ := Mask(c.in, o); !regexp.MustCompile(c.want).MatchString(out) {
+			t.Errorf("%q went as %q", c.in, out)
+		}
 	}
 }
 

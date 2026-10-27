@@ -1,11 +1,11 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"regexp"
 	"slices"
@@ -15,6 +15,7 @@ import (
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/plugin"
+	"github.com/yetone/magpie/internal/probelog"
 )
 
 // A plugin's provider (see internal/plugin) is a subscription like the
@@ -94,6 +95,23 @@ func (p Provider) PluginProvider() string {
 		return ""
 	}
 	return p.Account.plugin.ID
+}
+
+// PluginOpenAICompatible is whether p is a plugin's provider that speaks
+// model on an OpenAI-compatible API (@ai-sdk/openai-compatible), whose
+// other routes, the images API among them, its fetch sends under the same
+// base: SenseNova's plugin at token.sensenova.cn/v1. A plugin of a vendor
+// with an API of its own (Cursor's, Kiro's) speaks another package.
+func (p Provider) PluginOpenAICompatible(model string) bool {
+	if !p.IsPlugin() {
+		return false
+	}
+	pp := *p.Account.plugin
+	if cur, ok := PluginOf(p.ID); ok {
+		pp = cur
+	}
+	m, ok := pluginModel(pp, model)
+	return ok && firstOf(m.NPM, pp.NPM) == "@ai-sdk/openai-compatible"
 }
 
 // PluginOf is the plugin provider magpie's provider id is, when it is one.
@@ -505,12 +523,15 @@ func pluginFetch(pp plugin.Provider, account string, req *http.Request) (*http.R
 	ctx := req.Context()
 	var body []byte
 	if req.Body != nil {
-		b, err := io.ReadAll(req.Body)
+		// read into the length said: io.ReadAll grows from 512 bytes, so a
+		// 1 MB request was some 3 MB read (#3472)
+		buf := bytes.NewBuffer(make([]byte, 0, max(req.ContentLength, 0)+bytes.MinRead))
+		_, err := buf.ReadFrom(req.Body)
 		req.Body.Close()
 		if err != nil {
 			return nil, err
 		}
-		body = b
+		body = buf.Bytes()
 	}
 	rest := strings.TrimPrefix(req.URL.String(), pluginBase+pp.ID)
 	model := bodyModel(body)
@@ -682,7 +703,26 @@ func firstOf(ss ...string) string {
 // Do sends req, through the account's own transport when it has one (a
 // plugin's), the client the account asks for this request when it asks
 // for one (ZCode's Start Plan: zcodeStartClient), and client otherwise.
+//
+// A request sent for magpie's own test (probelog.With) is written into the
+// request log here, whichever way it goes: a plugin's fetch and a client
+// of the account's own pass no transport that would.
 func (p Provider) Do(client *http.Client, req *http.Request) (*http.Response, error) {
+	if ctx := req.Context(); probelog.Pending(ctx) {
+		start := time.Now()
+		req = req.WithContext(probelog.Taken(ctx))
+		res, err := p.do(client, req)
+		status := 0
+		if err == nil {
+			status = res.StatusCode
+		}
+		probelog.Note(ctx, req.URL.String(), req.Method, start, status, err)
+		return res, err
+	}
+	return p.do(client, req)
+}
+
+func (p Provider) do(client *http.Client, req *http.Request) (*http.Response, error) {
 	if p.Account != nil && p.Account.transport != nil {
 		return p.Account.transport(req)
 	}

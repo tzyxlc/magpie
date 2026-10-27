@@ -33,6 +33,13 @@ type QuotaWindow struct {
 	ResetsAt  *time.Time `json:"resetsAt,omitempty"`
 	ResetSecs int64      `json:"resetSecs,omitempty"`
 	Display   string     `json:"display,omitempty"`
+	// Text is set on a window that is its Display alone, with no share
+	// to tell: a plugin's row of what an account holds or has done
+	// (AutoClaw's 积分余额 and 每日签到, Cursor's on-demand spend, ZCode's
+	// gift to claim), which plugins send set aside with used 0 and no
+	// count. Its Used is no reading, so it is told as its text, never as
+	// "100% left".
+	Text bool `json:"text,omitempty"`
 	// Amount of Limit is the window's own count in Unit, when the vendor
 	// counts it so (WorkBuddy's credits): Used is Amount as a share of
 	// Limit. The GUI says it as used or left, as it says the share (#659).
@@ -167,9 +174,11 @@ type SubscriptionQuota struct {
 	// now (codexHeld): not on a window at 100% alone, which credits get
 	// past.
 	Held bool `json:"held,omitempty"`
-	// Daily is a WorkBuddy account's credits used day by day, as magpie
-	// counted them from its readings (credits_daily.go).
-	Daily *DailyCredits `json:"daily,omitempty"`
+	// Daily is the account's credits used day by day, as magpie counted
+	// them from its readings (credits_daily.go): its first credits
+	// window's, and MoreDaily its other pools', each apart.
+	Daily     *DailyCredits   `json:"daily,omitempty"`
+	MoreDaily []*DailyCredits `json:"moreDaily,omitempty"`
 	// Checkins is set on a WorkBuddy (China) or Trae CN account whose
 	// daily check-in is pressed for, CheckinBy whose ("" WorkBuddy's,
 	// "trae" Trae CN's), and Checkin is how its last one went, nil before

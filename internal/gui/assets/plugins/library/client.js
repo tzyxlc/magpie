@@ -871,6 +871,11 @@ magpie.plugin("library", (ctx) => {
       // (#1025), so none is offered until it does
       const waiting = !rtkUpgrading && rtk.waiting;
       const behind = !waiting && rtk.latest && rtk.version && vNewer(rtk.latest, rtk.version);
+      // why there is no upgrade to run: a cargo RTK with no cargo to be
+      // found says what to install or run (新v学员)
+      const noUpgrade = rtk.noUpgrade === "cargo"
+        ? t("RTK was installed with cargo, but magpie can't find cargo to upgrade it. Install Rust from rustup.rs, or run {cmd} in a terminal.", { cmd: rtk.manual })
+        : t("magpie can't tell how this RTK was installed — update it the way you installed it");
       if (rtkUpgrading) ttl.append(tag(t("Upgrading…"), "lib-new"));
       else if (waiting) ttl.append(tag(t("v{v} is out · waiting for {via}", { v: rtk.latest, via: rtk.waiting }), "", t("RTK {v} is out, but {via} has {has} so far — usually within a few days. Upgrade comes back once {via} has it.", { v: rtk.latest, via: rtk.waiting, has: rtk.waitingHas || rtk.version })));
       else if (behind) ttl.append(tag(t("v{v} is out", { v: rtk.latest }), "lib-new", t("RTK {v} is the latest release; this one is {have}", { v: rtk.latest, have: rtk.version })));
@@ -878,7 +883,7 @@ magpie.plugin("library", (ctx) => {
       if (behind || rtkUpgrading) {
         const ub = button(rtkUpgrading ? t("Upgrading…") : t("Upgrade"), "action", upgradeRTK);
         ub.disabled = rtkUpgrading || !rtk.upgrade;
-        ub.title = rtk.upgrade ? (rtk.admin ? t("Runs {cmd}, as administrator: Windows asks first", { cmd: rtk.upgrade }) : t("Runs {cmd}", { cmd: rtk.upgrade })) : t("magpie can't tell how this RTK was installed — update it the way you installed it");
+        ub.title = rtk.upgrade ? (rtk.admin ? t("Runs {cmd}, as administrator: Windows asks first", { cmd: rtk.upgrade }) : t("Runs {cmd}", { cmd: rtk.upgrade })) : noUpgrade;
         ttl.append(ub);
       }
       card.append(ttl);
@@ -886,6 +891,10 @@ magpie.plugin("library", (ctx) => {
       // with the tool's exit code and what it said, until the next try (#741)
       if (rtkUpgrading && rtk.upgrade) card.append(el("p", "lib-rtk-gain", t("Running {cmd} — this can take a few minutes.", { cmd: rtk.upgrade })));
       else if (rtkUpgradeErr) card.append(el("p", "lib-rtk-note lib-rtk-err", t("The upgrade failed: {why}", { why: rtkUpgradeErr })));
+      // no upgrade to run: said on the card, not only in the disabled
+      // button's tooltip, which a click never shows (新v学员: a cargo RTK
+      // on Windows whose Upgrade did nothing)
+      else if (behind && !rtk.upgrade) card.append(el("p", "lib-rtk-note lib-rtk-noupgrade", noUpgrade));
       if (rtk.note) card.append(el("p", "lib-rtk-note", rtk.note));
       // found where magpie looks, but not on the PATH the agents get: their
       // hooks run rtk by name, so it does nothing for them (#601)
@@ -1427,7 +1436,16 @@ magpie.plugin("library", (ctx) => {
     if (s.transport === "stdio") return [s.command, ...(s.args || [])].map(quote).join(" ");
     return s.url;
   }
-  function quote(a) { return /^[\w@%+=:,./-]+$/.test(a) ? a : "'" + a.replace(/'/g, `'\\''`) + "'"; }
+  // quote: an argument as this system's shell reads it, and words() reads
+  // back. On Windows that is cmd's double quotes, and a \ is a path's, not an
+  // escape: sh's 'C:\…\npx.cmd' read as quotes magpie had added to the
+  // command (fremontdango on Discord), and a path typed as it is lost its \
+  // and : on save (#2685).
+  const WIN_LINE = /^Win/.test(navigator.platform);
+  function quote(a) {
+    if (WIN_LINE) return a && !/[\s"'&|<>^%]/.test(a) ? a : '"' + a.replace(/"/g, '""') + '"';
+    return /^[\w@%+=:,./-]+$/.test(a) ? a : "'" + a.replace(/'/g, `'\\''`) + "'";
+  }
 
   function sseBlocked(s) {
     return (a) => {
@@ -1975,11 +1993,13 @@ magpie.plugin("library", (ctx) => {
     for (let i = 0; i < s.length; i++) {
       const c = s[i];
       if (q) {
-        if (c === q) q = "";
-        else if (c === "\\" && q === '"' && i + 1 < s.length) cur += s[++i];
+        // on Windows "" in quotes is one ", as quote() writes it
+        if (c === q && WIN_LINE && q === '"' && s[i + 1] === '"') cur += s[++i];
+        else if (c === q) q = "";
+        else if (c === "\\" && q === '"' && !WIN_LINE && i + 1 < s.length) cur += s[++i];
         else cur += c;
       } else if (c === "'" || c === '"') { q = c; any = true; }
-      else if (c === "\\" && i + 1 < s.length) { cur += s[++i]; any = true; }
+      else if (c === "\\" && !WIN_LINE && i + 1 < s.length) { cur += s[++i]; any = true; }
       else if (/\s/.test(c)) { if (cur || any) out.push(cur); cur = ""; any = false; }
       else cur += c;
     }
@@ -2160,6 +2180,19 @@ magpie.plugin("library", (ctx) => {
           g.append(...field(t("Sign-in"), signBox, t("For a server that asks you to sign in (OAuth): magpie signs in once, and every agent given it uses that sign-in")));
         } else appBox = null;
       }
+      // how long the agents that take one (Codex's startup_timeout_sec)
+      // wait for it to start, shown only when one of them is here (#3168)
+      const slow = [...new Set(all.filter((a) => a.startup).map((a) => a.name))];
+      if (slow.length) {
+        const wait = field2(d.startupTimeout || "", "30", (v) => {
+          wait.value = v.replace(/\D/g, "").slice(0, 5);
+          d.startupTimeout = Number(wait.value) || 0;
+        });
+        wait.inputMode = "numeric";
+        wait.classList.add("lib-startup");
+        wait.setAttribute("aria-label", t("Startup timeout"));
+        g.append(...field(t("Startup timeout"), wait, t("Seconds {agents} waits for it to start and list its tools. Empty leaves {agents}'s own 30; a value you wrote in its config.toml by hand is kept", { agents: slow.join(", ") })));
+      }
       slot.append(g);
       if (appBox) drawApp();
       // its own icon while it runs as it did; another way of running is another server
@@ -2178,7 +2211,7 @@ magpie.plugin("library", (ctx) => {
     // send saves the form; s is then the server as saved, for a save after
     // a sign-in's to be of it
     const send = async () => {
-      const body = { old: s ? s.name : "", server: { name: d.name, transport: d.transport, agents: d.agents } };
+      const body = { old: s ? s.name : "", server: { name: d.name, transport: d.transport, agents: d.agents, startupTimeout: d.startupTimeout || 0 } };
       if (d.transport === "stdio") Object.assign(body.server, { command: d.command, args: d.args, env: d.env });
       else Object.assign(body.server, { url: d.url, headers: d.headers, oauth: d.transport === "http" && d.oauth?.clientId ? d.oauth : null });
       take(await api("library/servers/save", body));

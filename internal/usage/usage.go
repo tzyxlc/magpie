@@ -7,10 +7,13 @@ package usage
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -123,7 +126,12 @@ type Record struct {
 	// sending it the body. #1532: a vendor that held a try ~100 s and
 	// said 503 read as 104 s "In magpie". 0 in a record written before
 	// they were, where Sent is all that is known.
-	Own     int64 `json:"own_ms,omitempty"`
+	Own int64 `json:"own_ms,omitempty"`
+	// Masking: the ms of Own that went on masking the request (Settings
+	// → Privacy: the rules, and the local model with its wait for a
+	// turn); 0 where nothing was masked, or in a record from before it
+	// was kept.
+	Masking int64 `json:"masking_ms,omitempty"`
 	Retried int64 `json:"retried_ms,omitempty"`
 	Queued  int64 `json:"queued_ms,omitempty"`
 	// Flow: the ms the reply's content took to come, from where its speed
@@ -234,26 +242,77 @@ func Append(r Record) {
 	if r.Time.IsZero() {
 		r.Time = Clock()
 	}
-	observeLedger(r)
+	if !r.IsProbe() { // magpie's own test is no call to export
+		observeLedger(r)
+	}
+	defer codexUsedNew(r)
 	b, err := json.Marshal(r)
 	if err != nil {
 		return
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if err := os.MkdirAll(filepath.Dir(Path()), 0o755); err != nil {
+	path := Path()
+	f, before := openLog(path)
+	if f == nil {
 		return
 	}
-	f, err := os.OpenFile(Path(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if !holdLog {
+		defer f.Close()
+	}
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		if holdLog {
+			f.Close()
+			heldLog.f = nil
+		}
+		return
+	}
+	after, _ := statLogHandle(f)
+	noteLogAppend(path, before, after)
+}
+
+// heldLog is the log Append keeps open between calls, under mu: every
+// request appends, and an open and a close of usage.jsonl each time was
+// most of Append's time (#3725). It is written to only while Path still
+// names that same file, so a log moved, removed or replaced is opened
+// again. Windows closes it after each write, since a file open there
+// can't be removed or renamed.
+var heldLog struct {
+	path string
+	f    *os.File
+}
+
+const holdLog = runtime.GOOS != "windows"
+
+// openLog returns the log to append to and its state before the write,
+// or nil when it can't be opened.
+func openLog(path string) (*os.File, os.FileInfo) {
+	if f := heldLog.f; f != nil {
+		heldLog.f = nil
+		if heldLog.path == path {
+			before, err := statLogHandle(f)
+			now, nerr := statLogFile(path)
+			if err == nil && nerr == nil && sameLogFile(before, now) {
+				heldLog.f = f
+				return f, before
+			}
+		}
+		f.Close()
+	}
+	// the folder is made only when it is missing: every request appends,
+	// and MkdirAll stat'ed it each time (#3725)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if errors.Is(err, fs.ErrNotExist) && os.MkdirAll(filepath.Dir(path), 0o755) == nil {
+		f, err = os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	}
 	if err != nil {
-		return
+		return nil, nil
 	}
-	defer f.Close()
 	before, _ := statLogHandle(f)
-	if _, err := f.Write(append(b, '\n')); err == nil {
-		after, _ := statLogHandle(f)
-		noteLogAppend(Path(), before, after)
+	if holdLog {
+		heldLog.path, heldLog.f = path, f
 	}
+	return f, before
 }
 
 // IsRejected also recognizes local rejections written before the explicit flag.
@@ -286,7 +345,7 @@ func Load(since time.Time) []Record {
 			break
 		} // an unfinished line is left for the next read
 		var r Record
-		if json.Unmarshal(b, &r) == nil && (since.IsZero() || !r.Time.Before(since)) {
+		if json.Unmarshal(b, &r) == nil && !r.IsProbe() && (since.IsZero() || !r.Time.Before(since)) {
 			out = append(out, r)
 		}
 	}
@@ -857,16 +916,15 @@ func summarize(p Period, now time.Time, recs []Record) Summary {
 }
 
 func summarizeFrom(p Period, now time.Time, first time.Time, historicalKeys map[string]bool, read func(func(Record))) Summary {
-	renamed := provider.Renamed()
+	renamed := provider.UsageRenames()
 	// the names models' usage is counted under (SlouchyQuill507): a model's
 	// row sums its ids, each call priced by its own id first
 	alias := provider.UsageAlias()
 	normalizedKeys := map[string]bool{}
 	for id := range historicalKeys {
-		if next, ok := renamed[id]; ok {
-			id = next
+		for _, next := range renamed.Each(id) {
+			normalizedKeys[next] = true
 		}
-		normalizedKeys[id] = true
 	}
 	historicalKeys = normalizedKeys
 	// a picked range's own days alone: its chart can start on the Monday
@@ -877,9 +935,7 @@ func summarizeFrom(p Period, now time.Time, first time.Time, historicalKeys map[
 			if r.Time.Before(from) || after(until, r.Time) {
 				return
 			}
-			if next, ok := renamed[r.Provider]; ok {
-				r.Provider = next
-			}
+			r.Provider = renamed.Of(r.Provider, r.Time)
 			fn(r)
 		})
 	}
@@ -1067,7 +1123,9 @@ func Vias(since time.Time) ViaIndex {
 	return cachedVias(since)
 }
 
-func buildVias(snapshot *logSnapshot, since time.Time) *viaLists {
+// A provider renamed since is listed by the id it has now (renames): the
+// Sessions tab named a renamed one by its old id (cybercaius).
+func buildVias(snapshot *logSnapshot, since time.Time, renames provider.Renames) *viaLists {
 	out := map[string][]Via{}
 	first := map[string]time.Time{}
 	keep := keptStrings{}
@@ -1075,7 +1133,7 @@ func buildVias(snapshot *logSnapshot, since time.Time) *viaLists {
 		if r.IsRejected() || r.IsReported() || r.Session == "" || r.Model == "" {
 			return
 		}
-		r.Provider, r.Model, r.Effort = keep.of(r.Provider), keep.of(r.Model), keep.of(r.Effort)
+		r.Provider, r.Model, r.Effort = keep.of(renames.Of(r.Provider, r.Time)), keep.of(r.Model), keep.of(r.Effort)
 		k := ReportedAs(r.Agent) + "|" + r.Session
 		vs := out[k]
 		if t, seen := first[k]; !seen || r.Time.Before(t) {
@@ -1127,7 +1185,7 @@ func LastSeen(agent string) time.Time {
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	for sc.Scan() {
 		var r Record
-		if json.Unmarshal(sc.Bytes(), &r) == nil && r.Agent == agent && r.Via == "" && r.Time.After(last) {
+		if json.Unmarshal(sc.Bytes(), &r) == nil && r.Agent == agent && r.Via == "" && !r.IsProbe() && r.Time.After(last) {
 			last = r.Time
 		}
 	}
