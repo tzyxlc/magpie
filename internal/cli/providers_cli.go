@@ -59,7 +59,8 @@ const providerUsage = `usage:
   magpie provider fallback <id> <provider/model>…   where requests go when it's out of quota or down (none clears)
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose:
                                           ids… replace the list, +id adds one, -id takes one out, all: the default,
-                                          none: serve none of them, its balance and usage still shown
+                                          none: serve none of them, its balance and usage still shown,
+                                          best: only the newest of each family it lists (Opus 5.6 replaces 5.5 once listed)
   magpie provider refresh <id>            fetch the vendor's model list again (as the app's Fetch models)
   magpie provider refresh-every <id> [6h|1d|off]
                                           have the gateway (magpie serve, the app) fetch the list again by itself
@@ -76,6 +77,10 @@ const providerUsage = `usage:
   magpie provider account-cap <id> <account> --window <name> [percent|none|default]
                                           a share for one window alone (e.g. "5 hours" 50): none is no cap on it,
                                           default has it follow the account's cap
+  magpie provider pool <id> [--accounts a,b,…] [--cap percent|off] [--stop on|off] [--careful on|off]
+                                          a subscription's accounts as one pool: which are in use and in what order,
+                                          each one's cap, --stop: answer 429 at the caps rather than go on to the
+                                          fallbacks, --careful: read usage again near a cap, holding what can't be read
   magpie provider account-concurrency <id> [account|key [n|off|default]]
                                           how many requests one account or key has out at once, over every model,
                                           routing group and agent: its own, off for none, default for the provider's
@@ -403,7 +408,9 @@ func notExposed(p provider.Provider) ([]string, string) {
 		}
 	}
 	why := "not picked"
-	if len(p.Models) == 0 {
+	if len(p.Models) == 0 && p.BestInFamily {
+		why = "best in family: an older one of its family"
+	} else if len(p.Models) == 0 {
 		why = fmt.Sprintf("none picked, so only the first %d", len(shown))
 	}
 	return out, why
@@ -507,7 +514,7 @@ func providerCmd(args []string) error {
 		// where requests go when this provider is out of quota, rate
 		// limited or down; "none" clears the list
 		if len(rest) < 1 {
-			return fmt.Errorf("magpie provider fallback <id> [provider/model… | none]")
+			return fmt.Errorf("magpie provider fallback <id> [provider/model… | group/<id>… | none]")
 		}
 		p, err := provider.Find(rest[0])
 		if err != nil {
@@ -517,8 +524,10 @@ func providerCmd(args []string) error {
 			p.Fallback = nil
 			if !(len(rest) == 2 && rest[1] == "none") {
 				for _, id := range rest[1:] {
+					// a routing group's id ("group/<id>") resolves too: the
+					// gateway sends the request through the group
 					if _, _, ok := provider.Resolve(id); !ok {
-						return fmt.Errorf("magpie knows no model %q (magpie models lists them)", id)
+						return fmt.Errorf("magpie knows no model or group %q (magpie models lists them)", id)
 					}
 					p.Fallback = append(p.Fallback, id)
 				}
@@ -602,6 +611,8 @@ func providerCmd(args []string) error {
 		return accountModelsCmd(rest)
 	case "account-cap", "account-caps":
 		return accountCapCmd(rest)
+	case "pool":
+		return poolCmd(rest)
 	case "account-concurrency", "account-limit":
 		return accountConcurrencyCmd(rest)
 	case "queue":
@@ -671,16 +682,19 @@ func providerCmd(args []string) error {
 		if len(rest) > 1 {
 			before := *p
 			// none: no model served at all, the provider kept for its
-			// balance and usage (#1818); all is the vendor's list again
+			// balance and usage (#1818); best: the newest of each family
+			// the vendor lists (Best in family); all is the vendor's list
+			// again
 			none := len(rest) == 2 && rest[1] == "none"
+			best := len(rest) == 2 && rest[1] == "best"
 			picks, err := editPicks(*p, rest[1:])
-			if none {
+			if none || best {
 				picks, err = nil, nil
 			}
 			if err != nil {
 				return err
 			}
-			p.Models, p.NoModels = picks, none
+			p.Models, p.NoModels, p.BestInFamily = picks, none, best
 			if err := provider.Save(*p); err != nil {
 				return err
 			}

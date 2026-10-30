@@ -8,7 +8,10 @@
 // sheets, the notebook and the boxes are the page's, moved over her. The
 // video is fetched when the row is first opened, never before. It plays
 // while the row is open and on screen, once through, and rests on its last
-// step; with reduced motion it starts there.
+// step; with reduced motion it starts there. Folded, or with the page left,
+// the video lets its source go, so a folded demo holds no decoder or
+// buffered video. Where the app's webview would crash on a video
+// (bootPrefs.noVideo: Linux without gst-plugins-good), she is her poster.
 
 const XQD_END = 27.5;
 const XQD_STEPS = [
@@ -59,7 +62,7 @@ function maskDemoStage() {
   const stage = el("div", "xq-stage");
   const at = (node, k) => { node.dataset.k = k; return node; };
   const box = (k, icon, title, sub) => {
-    const b = at(el("div", "xq-box"), k), h = el("div", "xq-bh"), ic = el("div", "xq-ic" + (icon === "book" ? " acc" : ""));
+    const b = at(el("div", "xq-box"), k), h = el("div", "xq-bh"), ic = el("div", "xq-ic" + (icon === "book" ? " xq-acc" : ""));
     ic.innerHTML = xqdIcon[icon];
     const words = el("div");
     words.append(xqdSay("xq-h", title));
@@ -77,12 +80,14 @@ function maskDemoStage() {
 
   const ledger = box("ledger", "book", "Little Magpie's notebook", "Kept on your computer only");
   ledger.append(at(xqdSay("xq-lempty", "Nothing in it yet"), "lempty"));
-  [[XQD_PM, XQD_MAIL, 40], [XQD_PP, XQD_PASS, 81]].forEach(([code, real, top], i) => {
+  // the entries follow the header, so a taller font moves them down with it
+  const entries = el("div", "xq-llist");
+  [[XQD_PM, XQD_MAIL], [XQD_PP, XQD_PASS]].forEach(([code, real], i) => {
     const r = at(el("div", "xq-lrow xq-mv"), "row" + i);
-    r.style.top = top + "px";
     r.append(el("span", "xq-lc xq-pillc", code), el("span", "xq-lv", real));
-    ledger.append(r);
+    entries.append(r);
   });
+  ledger.append(entries);
 
   const browser = at(el("div", "xq-box"), "browser"), bar = el("div", "xq-bbar");
   bar.innerHTML = `<i></i><i></i><i></i><div class="xq-url">${xqdIcon.lock}github.com/login</div>`;
@@ -361,17 +366,30 @@ function maskDemoBuild(body) {
   // video plays T leans toward its time, so she and the sheets keep step.
   // Without the video (it can't load or play) the frame clock alone runs.
   const vid = stage.querySelector("video");
-  let T = 0, playing = !calm(), open = false, seen = false, raf = 0, last = 0, fixed = 0, theme = "";
+  let T = 0, playing = !calm(), open = false, seen = false, raf = 0, last = 0, fixed = 0, theme = "", take = "";
   const dark = matchMedia("(prefers-color-scheme: dark)");
+  // boot.js says it before the page draws: /api/state's settings don't
+  // carry it, so a demo opened before Settings was never told (avk458 on X)
+  const noVideo = !!window.bootPrefs?.noVideo;
   const pickVid = () => {
     const th = document.documentElement.dataset.theme || (dark.matches ? "dark" : "light");
     if (th === theme) return;
     theme = th;
     vid.poster = `plugins/redact/xq_${th}.jpg`;
-    vid.src = `plugins/redact/xq_${th}.webm`;
+    take = noVideo ? "" : `plugins/redact/xq_${th}.webm`;
     // a new source starts paused: it goes on where the old one was
     seek(T);
     wake();
+  };
+  // the take is the video's source only while the row is open on the page
+  // shown; let go, the video frees its decoder and what it buffered
+  const hold = () => {
+    if (take && open && vp.getClientRects().length) {
+      if (vid.getAttribute("src") !== take) vid.src = take;
+    } else if (vid.hasAttribute("src")) {
+      vid.removeAttribute("src");
+      vid.load();
+    }
   };
   const seek = (t0) => { T = t0; if (vid.readyState >= 1) vid.currentTime = Math.min(t0, vid.duration - .02); };
   vid.addEventListener("loadedmetadata", () => seek(T));
@@ -414,6 +432,7 @@ function maskDemoBuild(body) {
   // wake starts or stops it as the row, the page and the window say
   function wake() {
     open = $("#mdRow")?.getAttribute("aria-expanded") === "true";
+    hold();
     if (live() && playing) {
       seek(T);
       vid.play().catch(() => {});
@@ -437,6 +456,6 @@ function maskDemoBuild(body) {
   if (!playing) seek(25.6);
   render(T); sync();
   setPlaying(playing);
-  root.__state = () => ({ T, ct: vid.currentTime, paused: vid.paused, rs: vid.readyState, src: vid.currentSrc.split("/").pop(), playing, raf: !!raf });
+  root.__state = () => ({ T, ct: vid.currentTime, paused: vid.paused, rs: vid.readyState, src: vid.getAttribute("src") ? vid.currentSrc.split("/").pop() : "", playing, raf: !!raf });
   return { wake, root };
 }

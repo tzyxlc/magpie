@@ -18,12 +18,12 @@ const K = "1792987654321000001";
 const record = { key: K, t: new Date(Date.now() - 60e3).toISOString(), route: "messages", what: "chat", agent: "claude", provider: "anthropic", model: "claude-opus-4-1", n: 1,
   values: [{ p: "{{PERSON_bbbb2222}}", k: "PERSON", b: "model", h: "", l: 3, n: 1 }], snips: { "{{PERSON_bbbb2222}}": "ask {{PERSON_bbbb2222}} about it" } };
 
-function serve(lang, theme, fetched) {
-  const settings = { theme, lang, tray: "panel", currency: "usd", redact: true, redactPersonal: true };
+function serve(lang, theme, fetched, more, boot = {}) {
+  const settings = { theme, lang, tray: "panel", currency: "usd", redact: true, redactPersonal: true, ...more };
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
     const json = (data) => route.fulfill({ json: data });
-    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"${theme}",web:true};` });
+    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = ${JSON.stringify({ lang, theme, web: true, ...boot })};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json({ agents: [{ id: "claude", name: "Claude Code", icon: "claudecode-color", fields: [] }], profiles: [], settings });
     if (url.pathname === "/api/settings") return json(settings);
@@ -56,7 +56,7 @@ async function open(engine, lang, width, opts = {}) {
   page.setDefaultTimeout(8000);
   const errors = [], fetched = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  await page.route("**/*", serve(lang, opts.theme || "light", fetched));
+  await page.route("**/*", serve(lang, opts.theme || "light", fetched, opts.settings, opts.boot));
   await page.goto("http://magpie.test/?view=masking");
   await page.locator("#mdRow").waitFor();
   return { browser, page, errors, fetched };
@@ -129,6 +129,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             return (end - low) / k < ({ req: 4, prov: 4 }[b.dataset.k] ?? 0) - .5 ? [`${b.dataset.k} ${Math.round((end - low) / k)}px to spare`] : [];
           });
         }), []);
+        // each box's icon is a 22px square (the app's own .acc once made the notebook's
+        // 38px tall), and the notebook's entries sit under its header, one after the other
+        assert.deepEqual(await page.evaluate(() => {
+          const k = document.querySelector(".xq-stage").getBoundingClientRect().width / 1000, r = (n) => n.getBoundingClientRect();
+          const bad = [...document.querySelectorAll(".xq-stage .xq-ic")].map((n) => [Math.round(r(n).width / k), Math.round(r(n).height / k)]).filter(([w, h]) => w !== 22 || h !== 22);
+          const book = document.querySelector('.xq-stage [data-k="ledger"]'), head = r(book.querySelector(".xq-bh")).bottom;
+          const rows = [...book.querySelectorAll(".xq-lrow")].map(r);
+          return { bad, gaps: [rows[0].top - head, rows[1].top - rows[0].bottom].map((g) => g / k >= 4) };
+        }), { bad: [], gaps: [true, true] });
         if (process.env.MASK_SHOTS) await page.screenshot({ path: path.join(process.env.MASK_SHOTS, `demo_${engine}_${lang}_${width}.png`), fullPage: true });
 
         await row.click();
@@ -215,6 +224,44 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const a = await state(page);
     // the new take plays on from where the old one was, in step with the sheets
     await until(async () => { const s = await state(page); return !s.paused && s.ct > a.T + .5 && Math.abs(s.ct - s.T) < .3; }, 8000, page);
+    assert.deepEqual(errors, []);
+  });
+  // on Linux without gst-plugins-good WebKitGTK's web process aborts on any
+  // video (stock Omarchy), so there she is her poster and the sheets still
+  // move. The app says so in boot.js, as the server does; /api/state's
+  // settings never carry it (avk458 on X: the demo crashed omarchy's app)
+  test(`${engine}: where the app can't play video she is her poster, and the demo still plays`, async (t) => {
+    const { browser, page, errors, fetched } = await open(engine, "en", 1100, { motion: true, boot: { noVideo: true } });
+    t.after(() => browser.close());
+    await page.locator("#mdRow").click();
+    await until(async () => (await state(page)).T > 1, 8000, page);
+    await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+    await until(() => fetched.includes("xq_dark.jpg"));
+    assert.deepEqual(await page.evaluate(() => { const v = document.querySelector(".xqd video"); return [v.getAttribute("src"), v.poster.split("/").pop()]; }), [null, "xq_dark.jpg"]);
+    assert.deepEqual(fetched.filter((f) => f.endsWith(".webm")), []);
+    const a = await state(page);
+    await until(async () => (await state(page)).T > a.T + .5, 8000, page);
+    assert.deepEqual(errors, []);
+  });
+  // folded, or with the page left, the video lets go of its source, so it
+  // holds no decoder or buffered video; opened again it goes on where it was
+  test(`${engine}: folded or left, the demo holds no video; opened again it goes on`, async (t) => {
+    const { browser, page, errors } = await open(engine, "en", 1100, { motion: true });
+    t.after(() => browser.close());
+    const src = () => page.evaluate(() => document.querySelector(".xqd video").getAttribute("src"));
+    await page.locator("#mdRow").click();
+    await until(async () => { const s = await state(page); return !s.paused && s.ct > 1; }, 8000, page);
+    await page.locator("#mdRow").click();
+    await until(async () => (await src()) === null, 8000, page);
+    const folded = await state(page);
+    assert.equal(folded.rs, 0, "no data held while folded");
+    await page.locator("#mdRow").click();
+    await until(async () => { const s = await state(page); return s.src === "xq_light.webm" && !s.paused && s.ct > folded.T; }, 8000, page);
+    // another page: the masking view hidden
+    await page.evaluate(() => { document.querySelector("#view-masking").hidden = true; });
+    await until(async () => (await src()) === null, 8000, page);
+    await page.evaluate(() => { document.querySelector("#view-masking").hidden = false; });
+    await until(async () => (await src()) !== null, 8000, page);
     assert.deepEqual(errors, []);
   });
 }

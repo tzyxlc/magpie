@@ -66,9 +66,9 @@ type groupJSON struct {
 	// Ref: the id agents pick it by (provider.Group.Ref): auto/<model> for
 	// a group magpie found, group/<id> for any other
 	Ref string `json:"ref"`
-	// ClassifierFailed: its classifier couldn't say the last time it was
-	// asked, and why (gateway.ClassifierFailure), which its card says
-	// (#1929): otherwise only each request's details did
+	// ClassifierFailed: its classifier couldn't say the last time this
+	// group asked it, and why (gateway.GroupClassifierFailure), which its
+	// card says (#1929): otherwise only each request's details did
 	ClassifierFailed *classifierFailedJSON `json:"classifierFailed,omitempty"`
 }
 
@@ -77,8 +77,9 @@ type classifierFailedJSON struct {
 	At    time.Time `json:"at"`
 }
 
-// classifierFailure is gateway.ClassifierFailure, which a test stands in for
-var classifierFailure = gateway.ClassifierFailure
+// classifierFailure is gateway.GroupClassifierFailure, which a test stands
+// in for
+var classifierFailure = gateway.GroupClassifierFailure
 
 type memberJSON struct {
 	ID       string `json:"id"`
@@ -276,7 +277,7 @@ func groupsState() groupsJSON {
 		gj.Decides = g.Decides()
 		gj.Ref = g.Ref()
 		if g.Classifier != "" {
-			if why, at, ok := classifierFailure(g.Classifier); ok {
+			if why, at, ok := classifierFailure(g.ID, g.Classifier); ok {
 				gj.ClassifierFailed = &classifierFailedJSON{Error: why, At: at}
 			}
 		}
@@ -320,7 +321,7 @@ func groupsState() groupsJSON {
 			}
 			of, effort := provider.MemberEffort(id)
 			m.Of, m.Effort = of, effort
-			if p, model, ok := provider.Resolve(of); ok {
+			if p, model, ok := provider.ResolveRoute(of); ok {
 				_, who := onOf(p)
 				m.Ready, m.Provider, m.Name, m.Icon, m.Model, m.On = true, p.ID, p.Name, p.Icon, model, max(len(who), 1)
 				m.CanFast = provider.CanFast(p, model)
