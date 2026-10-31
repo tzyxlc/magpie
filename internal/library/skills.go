@@ -539,6 +539,9 @@ func within(p, dir string) bool {
 }
 
 func (l *Library) syncSkills(t *Target, res *Result, all []*Target) {
+	if res.unreached(t) {
+		return
+	}
 	if t.Skills == "" {
 		return
 	}

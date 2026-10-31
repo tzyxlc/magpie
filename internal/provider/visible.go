@@ -294,7 +294,14 @@ func SetOwnModelsHidden(agent string, on bool) error {
 	} else {
 		s.OwnModelsHidden = slices.DeleteFunc(s.OwnModelsHidden, func(a string) bool { return a == agent })
 	}
-	return settings.Save(s)
+	if err := settings.Save(s); err != nil {
+		return err
+	}
+	// an agent's own config says the switch too (Claude Code's modelPicker
+	// replaceBuiltInOptions, #4548), so it is written again now, as a
+	// hidden model's change is
+	catalog.Touched()
+	return nil
 }
 
 // Families are the families providers and groups are tagged with, sorted.

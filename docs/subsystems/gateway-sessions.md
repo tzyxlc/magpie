@@ -170,6 +170,25 @@ capabilities to a gateway row. Verification: `TestDesktopSessionTitles`,
 `TestDesktopSessionTitleInStats`, `TestDesktopTitlesReadOncePerList`,
 `TestDesktopSessionTitlesOnPages`.
 
+Routing's stage names the session an account is serving (connor_yang on
+Discord): a row answering, or that answered, the request shown adds that
+request's session title after its status, on one line cut short with the
+whole line under the pointer. The title is what the list's By session heads
+use, from the same `/api/gateway/session-titles`: `sessions.Titles` by
+agent:id for every agent but Codex, Codex's name index by thread id (its
+parent's, for a subagent Codex names one for). The page keeps both by session
+id (`otherTitles`, `codexNames` in
+[`client.js`](../../internal/gui/assets/plugins/routing/client.js)), since each
+trace update brings its routes anew; a session not seen yet is asked about
+once (`askUnnamed`, skipped when a read since has taken it), and the rest
+with the list's 15-second refresh, never on the stage's per-second passes. A
+names reply silent on a Codex session (unknown to the index, or the index
+unread) leaves the title the trace brought, and only a reply that names it
+changes it. A session with no title says nothing more, and
+neither does a Codex request whose parent was only matched by its prompt
+(`parentMatched`), since that match is a guess. Verification:
+`routing-session-title.test.cjs`.
+
 A gateway projection can be deleted (lc on Discord). `sessions.DeleteGateway`
 moves its recorded text folders (`gateway-conversations/<date>/<identity hash>`)
 into magpie's session trash under `trash/sessions/gateway/`, with a note
@@ -658,10 +677,10 @@ concurrent posts beside the gateway's own writes, and a backfill of a full
 An agent's call to a tool of one of magpie's own MCP servers is a row of
 `usage.jsonl` too (ferock on Discord): the image server's
 `generate_image`, `generate_video` and `generation_result`, vision, web
-search, plugin tools and the hub's. The row has `source: "mcp"`,
+search, plugin tools and the router's. The row has `source: "mcp"`,
 `kind: "mcp"`, operation `execute_tool`, the tool's name as `req`, the
 server's name as `host` (`magpie-image`, `magpie-vision`,
-`magpie-web-search`, `magpie-tools`, or the Library server a hub tool is
+`magpie-web-search`, `magpie-tools`, or the Library server a router tool is
 of), the agent, the provider and model of the last gateway request the
 call made, its duration, its endpoint (the server's path, `stdio` for the
 Magpie Image server an agent runs) and, when it failed, the JSON-RPC
@@ -678,7 +697,7 @@ arguments are never kept, not even masked.
   and `/v1/videos` itself, so it reports each call it answered to the
   gateway's image MCP server with the JSON-RPC method `magpie/toolCalled`
   (`gateway.MCPCalledMethod`, params `MCPCalled`: tool, ms, model,
-  error); a tool not Magpie Image's is -32602. An older gateway that
+  error); a tool not Magpie Image's is -32602. Behind the [MCP router](mcp-router.md) it sends none: the router's `tools/call` is the row. An older gateway that
   doesn't know the method just leaves the call unlisted.
 - **Counted nowhere:** `Record.IsProbe` is true for these rows, so they
   ride the probe lane above: listed (`probeChunk`, kept as they are),

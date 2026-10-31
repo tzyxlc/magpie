@@ -94,8 +94,15 @@ var rtkSpecs = map[string]rtkSpec{
 		},
 		remove: func(a *agent.Agent) error {
 			d := rtkClaudeDir(a)
+			// rtk writes its hook under PostToolUse too when its pipeline
+			// has after_tool rules (rtk 1.0.1, src/hooks/init/claude.rs),
+			// and its own uninstaller takes PreToolUse, PostToolUse and
+			// SessionStart out alike; has reads the file whole, so an entry
+			// left under another event kept the row on (#2879)
 			return errors.Join(
 				dropHook(filepath.Join(d, "settings.json"), "hooks.PreToolUse", "rtk hook claude"),
+				dropHook(filepath.Join(d, "settings.json"), "hooks.PostToolUse", "rtk hook claude"),
+				dropHook(filepath.Join(d, "settings.json"), "hooks.SessionStart", "rtk hook claude"),
 				dropLines(filepath.Join(d, "CLAUDE.md"), rtkRef),
 				rm(filepath.Join(d, "RTK.md")))
 		},
@@ -125,21 +132,21 @@ var rtkSpecs = map[string]rtkSpec{
 		// over the user's
 		flags: []string{"--gemini", "--hook-only"}, patch: true,
 		has: func(a *agent.Agent) bool {
-			return contains(filepath.Join(rtkHome(a), ".gemini", "settings.json"), "rtk-hook-gemini")
+			return contains(rtkAt(a, ".gemini", "settings.json"), "rtk-hook-gemini")
 		},
 		files: func(a *agent.Agent) []string {
-			d := filepath.Join(rtkHome(a), ".gemini")
+			d := rtkAt(a, ".gemini")
 			return []string{filepath.Join(d, "settings.json"), filepath.Join(d, "hooks", "rtk-hook-gemini.sh"), filepath.Join(d, "hooks", ".rtk-hook.sha256")}
 		},
 		remove: func(a *agent.Agent) error {
-			d := filepath.Join(rtkHome(a), ".gemini")
+			d := rtkAt(a, ".gemini")
 			err := errors.Join(
 				dropHook(filepath.Join(d, "settings.json"), "hooks.BeforeTool", "rtk-hook-gemini"),
 				rm(filepath.Join(d, "hooks", "rtk-hook-gemini.sh"), filepath.Join(d, "hooks", ".rtk-hook.sha256")))
 			os.Remove(filepath.Join(d, "hooks")) // when nothing else is in it
 			return err
 		},
-		dir: func(a *agent.Agent) string { return filepath.Join(rtkHome(a), ".gemini") },
+		dir: func(a *agent.Agent) string { return rtkAt(a, ".gemini") },
 	},
 	"opencode": {
 		flags: []string{"--opencode"}, patch: true, withClaude: true, blocked: openCodeBlocked,
@@ -151,30 +158,30 @@ var rtkSpecs = map[string]rtkSpec{
 	"cursor": {
 		flags: []string{"--agent", "cursor"}, patch: true, withClaude: true,
 		has: func(a *agent.Agent) bool {
-			return contains(filepath.Join(rtkHome(a), ".cursor", "hooks.json"), "rtk hook cursor")
+			return contains(rtkAt(a, ".cursor", "hooks.json"), "rtk hook cursor")
 		},
-		files: func(a *agent.Agent) []string { return []string{filepath.Join(rtkHome(a), ".cursor", "hooks.json")} },
+		files: func(a *agent.Agent) []string { return []string{rtkAt(a, ".cursor", "hooks.json")} },
 		remove: func(a *agent.Agent) error {
-			return dropHook(filepath.Join(rtkHome(a), ".cursor", "hooks.json"), "hooks.preToolUse", "rtk hook cursor")
+			return dropHook(rtkAt(a, ".cursor", "hooks.json"), "hooks.preToolUse", "rtk hook cursor")
 		},
-		dir: func(a *agent.Agent) string { return filepath.Join(rtkHome(a), ".cursor") },
+		dir: func(a *agent.Agent) string { return rtkAt(a, ".cursor") },
 	},
 	"copilot": {
 		flags: []string{"--copilot"}, patch: true,
 		has: func(a *agent.Agent) bool {
-			return exists(filepath.Join(rtkHome(a), ".copilot", "hooks", "rtk-rewrite.json"))
+			return exists(rtkAt(a, ".copilot", "hooks", "rtk-rewrite.json"))
 		},
 		files: func(a *agent.Agent) []string {
-			d := filepath.Join(rtkHome(a), ".copilot")
+			d := rtkAt(a, ".copilot")
 			return []string{filepath.Join(d, "hooks", "rtk-rewrite.json"), filepath.Join(d, "copilot-instructions.md")}
 		},
 		remove: func(a *agent.Agent) error {
-			d := filepath.Join(rtkHome(a), ".copilot")
+			d := rtkAt(a, ".copilot")
 			return errors.Join(
 				rm(filepath.Join(d, "hooks", "rtk-rewrite.json")),
 				dropBlock(filepath.Join(d, "copilot-instructions.md"), "<!-- rtk-instructions", "<!-- /rtk-instructions -->"))
 		},
-		dir: func(a *agent.Agent) string { return filepath.Join(rtkHome(a), ".copilot") },
+		dir: func(a *agent.Agent) string { return rtkAt(a, ".copilot") },
 	},
 	// Antigravity CLI (agy): rtk 0.51 on writes a plugin of its own into
 	// Antigravity's global customization folder, ~/.gemini/config, shared
@@ -384,7 +391,7 @@ func codexBlocked(a *agent.Agent) string {
 
 // agyPlugin is the folder rtk's installer writes its Antigravity plugin to.
 func agyPlugin(a *agent.Agent) string {
-	return filepath.Join(rtkHome(a), ".gemini", "config", "plugins", "rtk")
+	return rtkAt(a, ".gemini", "config", "plugins", "rtk")
 }
 
 // agyBlocked: rtk installs for Antigravity globally from 0.51.0 on; 0.50
@@ -462,13 +469,13 @@ func hermesPlugin(a *agent.Agent) string { return filepath.Join(a.Dir, "plugins"
 
 // extensionSpec is pi's and omp's: an extension of rtk's own, and nothing else.
 func extensionSpec(id string) rtkSpec {
-	ext := func(a *agent.Agent) string { return filepath.Join(rtkHome(a), "."+id, "agent", "extensions", "rtk.ts") }
+	ext := func(a *agent.Agent) string { return rtkAt(a, "."+id, "agent", "extensions", "rtk.ts") }
 	return rtkSpec{
 		flags: []string{"--agent", id}, patch: true,
 		has:    func(a *agent.Agent) bool { return exists(ext(a)) },
 		files:  func(a *agent.Agent) []string { return []string{ext(a)} },
 		remove: func(a *agent.Agent) error { return rm(ext(a)) },
-		dir:    func(a *agent.Agent) string { return filepath.Join(rtkHome(a), "."+id, "agent") },
+		dir:    func(a *agent.Agent) string { return rtkAt(a, "."+id, "agent") },
 	}
 }
 
@@ -1056,6 +1063,14 @@ func SetRTK(id string, on bool) (*RTKView, error) {
 
 func rtkInstall(bin string, a *agent.Agent) error {
 	sp := rtkSpecs[rtkKind(a.ID)]
+	// a folder in a WSL distro that is a link it couldn't resolve isn't
+	// written through (#4502)
+	if err := a.Unreached(); err != nil {
+		return err
+	}
+	if _, err := agent.WSLOpen(a, sp.dir(a)); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(sp.dir(a), 0o755); err != nil {
 		return err
 	}

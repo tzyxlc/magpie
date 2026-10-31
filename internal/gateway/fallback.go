@@ -275,8 +275,11 @@ func perKeyBarred(p provider.Provider, model string, from provider.Protocol) (ou
 		})
 		// an account whose plan lacks the model (a Free one behind a Plus)
 		// would only answer 400; it is tried only when none lists it
+		// (by the vendor's own id: an account's list names its models by
+		// theirs, not by one the user lists one by)
+		own := p.OwnModelID(model)
 		for _, c := range all {
-			if c.p.Account.Lists(model) {
+			if c.p.Account.Lists(own) {
 				out = append(out, c)
 			} else {
 				left = append(left, c)
@@ -1874,7 +1877,9 @@ type holdWriter struct {
 	// refusal may still end: held longer (holdThinking)
 	thinking bool
 	// thinkingShown: the model's vendor never refuses after reasoning
-	// (refusesAfterThinking), so its reasoning goes through as it comes
+	// (refusesAfterThinking), or the member has gone on from its thinking
+	// to an answer enough times running (holdsThinking), so its reasoning
+	// goes through as it comes
 	thinkingShown bool
 	// thoughtThrough: the try went through on its reasoning alone
 	// (thinkingShown) while the request could still have asked again, so
@@ -2266,10 +2271,15 @@ func (h *holdWriter) keptQuiet() bool {
 
 // refusesAfterThinking tells whether a model's vendor may end a reply that
 // has only reasoned with its safety filter's refusal: Claude's stop_reason
-// refusal, OpenAI's content_filter or bio_policy, Gemini's SAFETY (#248).
-// Anybody else's reasoning — GLM's, DeepSeek's, Kimi's… — is shown as it
-// comes: held, GLM on a ZCode account through a group showed Claude Code
-// its thinking only once the text began, all at once (悠悠哥 on Discord).
+// refusal, OpenAI's content_filter or bio_policy, Gemini's SAFETY (#248),
+// and DeepSeek's content_filter: deepseek-v4.1-flash on WorkBuddy reasoned
+// for 5s and then ended content_filter with nothing said (the plugin takes
+// out the filter's canned line), and with its reasoning let through the
+// group's next member was never asked and DeepSeek Harness failed "The
+// model refused to complete the request" (itspig, plugins #540).
+// Anybody else's reasoning — GLM's, Kimi's… — is shown as it comes: held,
+// GLM on a ZCode account through a group showed Claude Code its thinking
+// only once the text began, all at once (悠悠哥 on Discord).
 func refusesAfterThinking(model string) bool {
 	if modelFamily(model) != "" {
 		return true
@@ -2278,7 +2288,76 @@ func refusesAfterThinking(model string) bool {
 	if i := strings.LastIndex(m, "/"); i >= 0 {
 		m = m[i+1:]
 	}
-	return strings.HasPrefix(m, "gemini")
+	return strings.HasPrefix(m, "gemini") || deepseekAfterThinking(m)
+}
+
+// deepseekAfterThinking tells whether the model is DeepSeek's, the one
+// vendor whose reasoning the refusal hold lets go once the member has
+// gone on from its thinking to an answer enough times running
+// (holdsThinking): Claude's, GPT's and Gemini's is held whatever the
+// member has answered lately (#248).
+func deepseekAfterThinking(model string) bool {
+	m := strings.ToLower(model)
+	if i := strings.LastIndex(m, "/"); i >= 0 {
+		m = m[i+1:]
+	}
+	return strings.HasPrefix(m, "deepseek")
+}
+
+// thoughtCleanMost is how many thinking replies in a row that went on to
+// an answer trust a DeepSeek member with its reasoning as it comes
+// (holdsThinking): its filter refuses after thinking hardly ever (#4512:
+// one content_filter in 33,245 group requests over 7 days), and held,
+// every one of those requests kept the agent waiting its whole thinking
+// out. A refusal of its own takes the trust back (thoughtRefused).
+const thoughtCleanMost = 3
+
+// holdsThinking tells whether the try's reasoning is held back for a
+// refusal after it while another candidate could answer. DeepSeek's is,
+// until the member's thinking has gone on to an answer thoughtCleanMost
+// times running; past that it goes through as it comes, GLM's way.
+// Claude's, GPT's and Gemini's is held whatever the member answered
+// lately (#248).
+func (s *Server) holdsThinking(c candidate) bool {
+	if !refusesAfterThinking(c.model) {
+		return false
+	}
+	if !deepseekAfterThinking(c.model) {
+		return true
+	}
+	s.thoughtMu.Lock()
+	defer s.thoughtMu.Unlock()
+	return s.thoughtClean[c.p.ID+"/"+c.model] < thoughtCleanMost
+}
+
+// thoughtAnswered counts a thinking reply that went on to an answer, for
+// holdsThinking's trust to run out on.
+func (s *Server) thoughtAnswered(c candidate) {
+	if !deepseekAfterThinking(c.model) {
+		return
+	}
+	s.thoughtMu.Lock()
+	defer s.thoughtMu.Unlock()
+	if s.thoughtClean == nil {
+		s.thoughtClean = make(map[string]int)
+	}
+	s.thoughtClean[c.p.ID+"/"+c.model]++
+}
+
+// thoughtRefused takes the trust back: the member's filter refused a
+// reply after (or beside) its thinking (plugins #540), so its reasoning
+// is held again for the next requests, until it has answered
+// thoughtCleanMost times running.
+func (s *Server) thoughtRefused(c candidate) {
+	if !deepseekAfterThinking(c.model) {
+		return
+	}
+	s.thoughtMu.Lock()
+	defer s.thoughtMu.Unlock()
+	if s.thoughtClean == nil {
+		s.thoughtClean = make(map[string]int)
+	}
+	s.thoughtClean[c.p.ID+"/"+c.model] = 0
 }
 
 // scan reads the held stream's events so far: an error before any content
@@ -2398,6 +2477,8 @@ type keptAlive struct {
 	// it asked; streams, whether it asked for a stream
 	told    time.Time
 	streams bool
+	// codex, whether Codex sent the request (fromCodex)
+	codex bool
 	// Only opted-in Claude cache reporting can defer initial keepalives.
 	// Selection releases it before process startup; expiry keeps the stream alive.
 	cacheReportUntil time.Time
@@ -2413,6 +2494,18 @@ type keptAlive struct {
 // Discord). Each try was held for up to holdThinking or holdLead by
 // itself, so a second held try, or a group's pause (#1418), went past it.
 var agentQuietMost = 4 * time.Minute
+
+// compactsInStream says a refusal of a request too large to be taken —
+// past the vendor's byte cap (413) or the model's window (tooLong) — goes
+// to the agent in its stream though none was sent yet: Codex compacts on
+// response.failed context_length_exceeded alone. Told by status, it takes
+// a 413 for an unexpected status and a 400 context_length_exceeded for an
+// invalid request, and either ends the turn with nothing compacted, a
+// compaction refused the same way failing outright (codex-rs codex-api
+// api_bridge.rs). Another client keeps the status.
+func (a *keptAlive) compactsInStream(status int, msg string) bool {
+	return a.codex && a.streams && a.proto == provider.Responses && (status == http.StatusRequestEntityTooLarge || tooLong(status, msg))
+}
 
 // tooQuiet says whether a Responses agent that has had no event of its
 // reply would go agentQuietMost without one after d more.
@@ -2644,6 +2737,13 @@ func (h *holdWriter) thoughtOnly() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.thoughtThrough
+}
+
+// sawThinking tells whether the try reasoned at all, held or as it came.
+func (h *holdWriter) sawThinking() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.thinking || h.thoughtThrough
 }
 
 // handBack sends a refusal held with nothing said as the vendor's own
@@ -2958,6 +3058,12 @@ var filterReasons = map[string]string{
 	"IMAGE_SAFETY":            "safety",
 }
 
+// finishFailed is what a 200 stream the vendor ends with finish_reason
+// "error" (#2471) says of itself, in the failure the hold keeps: the turn
+// failed, as the word says, and the group's next member answers it, while
+// taken for content it reached the agent and the try stood as a success.
+const finishFailed = `the reply ended with finish_reason "error"`
+
 // refusedNote is what a refusal is noted as: the vendor's own reason.
 func refusedNote(reason string) string {
 	return "safety filter: " + reason
@@ -3253,6 +3359,14 @@ func streamEvent(ev []byte) (kind, status int, msg string) {
 			if c.FinishReason != nil {
 				if r, ok := filterReasons[*c.FinishReason]; ok {
 					return refusal(r)
+				}
+				if *c.FinishReason == "error" {
+					// WorkBuddy's and a DeepSeek harness's word for a turn
+					// it failed, not finished (#2471): the failure an error
+					// event is, held for the group's next candidate, where
+					// taken for content it went to the agent and the try
+					// stood as a success
+					return eventError, streamStatus(finishFailed), finishFailed
 				}
 				return eventContent, 0, ""
 			}
