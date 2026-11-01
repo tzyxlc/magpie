@@ -16,7 +16,6 @@ import (
 	"math"
 	"net/url"
 	"os"
-	"path/filepath"
 	"reflect"
 	"regexp"
 	"runtime"
@@ -335,9 +334,14 @@ type Settings struct {
 	CheckinOff []string `json:"checkinOff,omitempty"`
 	// MemberModel has a reply's model name the routing group's member
 	// that answered, as magpie's provider/model id (workbuddy/glm-5.3-flash),
-	// rather than the vendor's own name for it, for agents that count
-	// usage by the reply's model (#822). Claude Code, Claude Desktop and
-	// Codex always get the vendor's name: they read it themselves.
+	// for agents that count usage by the reply's model (#822). Off, as by
+	// default, a reply sent under another name than the one asked for (a
+	// group's member, a model's own id, a provider/model id) names the
+	// model the agent asked for (issennknight on Discord: an agent warned
+	// that deepseek-v4.1-flash came back as deepseek-v4.1-flash-1017);
+	// one the vendor named as asked keeps the vendor's name, a dated one
+	// too. Claude Code, Claude Desktop and Codex never get the member's
+	// id: they read the name themselves (gateway's replyNamingOf).
 	MemberModel bool `json:"memberModel,omitempty"`
 	// NoLoopGuard lets a streamed reply run on when its reasoning or text
 	// is stuck in a loop of the same few lines (#1359). Off, as by
@@ -356,6 +360,13 @@ type Settings struct {
 	// images, safeguards or client cache marks): the plan counts a -p
 	// request at about twice an interactive one.
 	ClaudePrintMode bool `json:"claudePrintMode,omitempty"`
+	// ClaudeTUIOnly has a Claude subscription's model requests never run
+	// as `claude -p`: one the interactive mode can't take (safeguards, a
+	// JSON schema, …), or whose interactive mode doesn't come up, fails,
+	// saying why, where it would otherwise be -p. Reading the plan's
+	// allowance (/usage, no model request) is still -p. ClaudePrintMode,
+	// when set too, wins.
+	ClaudeTUIOnly bool `json:"claudeTUIOnly,omitempty"`
 	// ClaudeRunsMost is how many Claude Code processes a Claude
 	// subscription may have running at once: conversations' runs, those
 	// waiting for a next turn or on tool results, and one-off tests and
@@ -1394,7 +1405,7 @@ func renameInMap(m reflect.Value, from, to string) bool {
 }
 
 // Path is the settings file.
-func Path() string { return filepath.Join(Dir(), "settings.json") }
+func Path() string { return appdir.Join(Dir(), "settings.json") }
 
 // Dir is the folder every magpie file lives in: the data folder beside a
 // portable magpie (appdir.Portable), else ~/.config/magpie.
@@ -1680,7 +1691,7 @@ func GatewayAddr() string {
 // magpie whose settings these are, which one the variable moves (magpie-dev,
 // a sandbox) runs beside.
 func SavedAddr() string {
-	p := Load().Port
+	p := Shared().Port
 	if p == 0 || CheckPort(p) != nil {
 		p = DefaultPort
 	}

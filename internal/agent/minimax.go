@@ -189,7 +189,7 @@ func miniMaxAt(at place, dir string) *Agent {
 				return nil
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(miniMaxOwnOptions(path, cur["model"]), viaMagpie("minimax-code", magpieID+"/")...)
+				return withVia(miniMaxOwnOptions(path, cur["model"]), "minimax-code", magpieID+"/")
 			},
 		}},
 	}, path)
@@ -227,7 +227,7 @@ func writeMiniMaxEntryAt(path, gw string) error {
 	models := &yaml.Node{Kind: yaml.MappingNode}
 	// keys is each model's key, its flat one where it has one
 	keys := map[string]string{}
-	for _, m := range magpieModels("minimax-code") {
+	for _, m := range sharedModels("minimax-code") {
 		key := mcodeKey(flat, m.ID)
 		keys[m.ID] = key
 		mn := yamlGet(old, key)

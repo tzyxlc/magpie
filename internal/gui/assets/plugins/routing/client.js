@@ -109,10 +109,14 @@ function routingPage(part) {
   const steps = el("ol", "rt-steps");
   // what the request's prompt held: its context window (context.js)
   const ctxBox = el("div", "rt-ctx");
+  // each session's context window, under the card, while several send at
+  // once: under it, so the strip coming or going never moves the card
+  const ctxSess = el("div", "rt-ctx-sess");
+  ctxSess.hidden = true;
   // the request's own request and response, opened from its head
   const bodies = el("div", "rt-bodies");
   bodies.hidden = true;
-  log.append(logHead, steps, bodies, ctxBox);
+  log.append(logHead, steps, bodies, ctxBox, ctxSess);
   const off = el("div", "none rt-off");
   // over the stage while a replay plays: the time it is replaying, which
   // requests are in flight then, and where it is among them
@@ -923,7 +927,10 @@ function routingPage(part) {
       else if (smart(x) && !x.known && someKnown(x)) out.push(t("{who}: what it has left isn't known yet, so it goes after those known.", { who: who(x) }));
     }
     const pooled = r.order.find((x) => !x.aside && x.kind === "key");
-    for (const x of r.order.filter((x) => x.aside)) out.push(t("{who} is made for {api}, not {other} as the keys routed over are, so it isn't one of them: it's tried after them.", { who: who(x), api: API[x.speaks] || x.speaks || t("any API"), other: API[pooled?.speaks] || pooled?.speaks || t("any API") }));
+    // held back, the provider's accounts at once taken by those before it
+    // in the list (01huadalang on Discord, ZCode)
+    for (const x of r.order.filter((x) => x.reserve)) out.push(t("{who} is in reserve: {n} of its provider's accounts or keys take requests at once, the first in the list, so it's tried only once they have all failed.", { who: who(x), n: x.reserve }));
+    for (const x of r.order.filter((x) => x.aside && !x.reserve)) out.push(t("{who} is made for {api}, not {other} as the keys routed over are, so it isn't one of them: it's tried after them.", { who: who(x), api: API[x.speaks] || x.speaks || t("any API"), other: API[pooled?.speaks] || pooled?.speaks || t("any API") }));
     for (const x of r.left || []) out.push(leftWhy(x));
     return out;
   }
@@ -941,6 +948,7 @@ function routingPage(part) {
       case "session": return t("Kept on {who}: it answered this conversation before, and affinity keeps a session with one account.", { who: last });
       case "turn": return t("Kept on {who}: {agent} is handing back tool results within turn {n}, and moving now would lose what the vendor cached of it.", { who: last, agent: agentName(r.agent), n: a.turn });
       case "cache": return t("Kept on {who}: {d} ago the vendor read {r} tokens of this conversation from its cache and wrote {w} to it; anyone else would be sent them afresh and paid in full.", { who: last, r: tokens(a.cacheRead || 0), w: tokens(a.cacheWrite || 0), d: ago });
+      case "strict": return a.main ? t("{who}, a fallback, answered this conversation last. The provider's own {first} is ready again, but Stays is Strict, which never moves a conversation, so it stays on the fallback; new conversations go to {first}.", { who: last, first: who(a.main) }) : null;
       case "new-turn": return routing === "rotate"
         ? t("Turn {n} begins: in turn, it goes to the one after {who}, which answered the last turn — {next}.", { n: a.turn, who: last, next: who(r.order[0]) })
         : lead ? null : t("Turn {n} begins: affinity keeps a conversation only within a turn, so routing decides afresh.", { n: a.turn });
@@ -949,9 +957,11 @@ function routingPage(part) {
     switch (a.why) {
       case "resting": return t("{who} answered this conversation last, but it is resting, so the conversation moves.", { who: last });
       case "spent": return t("{who} answered this conversation last, but its allowance is all but used up, so the conversation moves.", { who: last });
+      case "reserve": return t("{who} answered this conversation last, but it is in reserve while those before it in the list can take requests, so the conversation moves back to them.", { who: last });
       case "gone": return t("{who} answered this conversation last, but it is no longer one to route to.", { who: last });
       case "order": return t("{who} answered this conversation last, but the group goes in order and {first}, ahead of it, is ready again, so turn {n} goes back to {first}.", { who: last, first: who(r.order[0]), n: a.turn });
       case "main": return t("{who}, a fallback, answered this conversation last, but the provider's own {first} is ready again, so turn {n} goes back to it.", { who: last, first: who(r.order[0]), n: a.turn });
+      case "back": return t("{who} took this conversation while {first}, listed ahead of it in the group, couldn't; {first} is ready again, so turn {n} goes back to it.", { who: last, first: who(r.order[0]), n: a.turn });
       case "no-cache": return t("{who} answered this conversation last, but the vendor then read only {r} tokens of it from its cache and wrote {w} — not worth staying for.", { who: last, r: tokens(a.cacheRead || 0), w: tokens(a.cacheWrite || 0) });
       case "cold": return t("{who} answered this conversation {d} ago, longer than the 5 minutes a vendor keeps a prompt cached — so routing decides afresh.", { who: last, d: ago });
       case "off": return t("Affinity is off: each request is routed afresh, whoever answered its conversation before.");
@@ -1440,6 +1450,10 @@ function routingPage(part) {
   // nothing: never one matched to it by its prompt (parentMatched), which
   // the list's head says is a guess (connor_yang on Discord)
   const titleOf = (r) => !r || r.parentMatched ? "" : r.agent === "codex" ? codexNames.get(groupSession(r)) || "" : otherTitles.get(ownKey(r)) || "";
+  // sessionName is what a request's session is called where it has a
+  // name: its agent's title for it (the trace's, or one read since), else
+  // nothing
+  const sessionName = (r) => r.sessionTitle || titleOf(r) || "";
   const subs = new Map();   // a group in the group's way down → its heading { li, wire, key, up }
   // A provider's keys serving one model, FOLD_AT or more of them side by
   // side, fold into one row that tells of them all (#1319: 53 keys for one
@@ -2600,6 +2614,7 @@ function routingPage(part) {
       else if (gave.has(id)) s = t("{status} · {fail} · passed to {agent}", { status: gave.get(id).status, fail: failWord(gave.get(id).fail), agent: agentName(r.agent) });
       else if (went.has(id)) s = t("{status} · {fail} · went on to the next", { status: went.get(id).status, fail: failWord(went.get(id).fail) });
       else if (w.noURL) s = noURLWord(w);
+      else if (w.reserve) s = t("in reserve · {n} at once", { n: w.reserve });
       else if (w.sunk && !lifted(sunkKey(w), at(w.sunk))) s = t("rate limited at {time} · at the back", { time: clock(w.sunk) });
       // the row smart routing's intent put first says the intent instead
       else if (said) s = said;
@@ -2750,6 +2765,7 @@ function routingPage(part) {
     holdStory();
     renderBodies(r);
     renderCtx(r);
+    renderCtxSessions();
   }
   // A request's request and response (Fate on Discord: a request on this
   // page, a Codex prediction say, couldn't be opened to what was sent and
@@ -2886,24 +2902,88 @@ function routingPage(part) {
       .map((x) => ({ id: x.id, tokens: x.prompt.tokens, time: x.time })) : null;
     if (series && !series.some((x) => x.id === r.id)) series.push({ id: r.id, tokens: r.prompt.tokens, time: r.time });
     if (ctxFor && ctxFor !== r.id) ctxFor = 0;
-    const key = JSON.stringify([document.documentElement.lang, ctxFor, r.id, r.done, r.prompt.tokens, r.prompt.counted, r.prompt.window, r.usage?.length, series?.map((x) => x.id + ":" + x.tokens).join()]);
+    // the session by its name where it has one (tjhhhh), else its id
+    const named = sessionName(r), sess = named || groupSession(r) || r.conv || "";
+    const cut = named ? 28 : 14;
+    const key = JSON.stringify([document.documentElement.lang, ctxFor, r.id, r.done, r.prompt.tokens, r.prompt.counted, r.prompt.window, r.usage?.length, series?.map((x) => x.id + ":" + x.tokens).join(), sess]);
     if (key === ctxKey) return;
     ctxKey = key;
     const still = ctxShown === r.id;
     ctxShown = r.id;
-    const sess = groupSession(r) || r.conv || "";
     const card = ctxBox.firstElementChild;
     const draw = card?.ctxUpdate && (still || !pinned) ? card.ctxUpdate : (r, o) => ctxBox.replaceChildren(window.ctxCard(r, o));
     draw(r, {
       still, series, tab: ctxTab, place: "routing", foldable: true,
       open: ctxFor === r.id, onFold: () => { ctxFor = 0; },
       onTab: (id) => { ctxTab = id; },
-      crumbs: [agentName(r.agent), sess && (sess.length > 14 ? sess.slice(0, 12) + "…" : sess), "#" + r.id],
+      crumbs: [agentName(r.agent), sess && (sess.length > cut ? sess.slice(0, cut - 2) + "…" : sess), "#" + r.id],
       onPoint: (pt) => {
         const x = routes.get(pt.id) || listed().find((y) => y.id === pt.id);
         if (x) pick(x);
       },
     });
+  }
+  // renderCtxSessions: each session sending now, its own small block with
+  // its newest context reading, named as its agent named it (tjhhhh on
+  // Discord: with several sessions through magpie at once the card went
+  // from one's context to the other's, and which was which couldn't be
+  // told). A reading is kept by the session the request is of, as the
+  // card's own line of prompts is (renderCtx's same). A session is live
+  // while it has a request under way or one within CTX_LIVE of the newest
+  // request; the newest session comes first and each keeps its place while
+  // the sessions take turns, as a block that moved on every request would
+  // be the card's jumping again. One session alone is the card's own: none
+  // are shown then, nor for a past day or a replay. A block clicked tells
+  // of that session's newest request.
+  const CTX_LIVE = 15 * 60e3, CTX_SESS_MAX = 6;
+  const ctxSessBlocks = new Map(); // session → { b, name, sub, bar }
+  const ctxSessionOf = (r) => !r.prompt || r.kind ? "" : sessionKey(r) || (r.conv ? JSON.stringify([r.agent || "other", "conv", r.conv]) : "");
+  function renderCtxSessions() {
+    const rs = day || rp ? [] : listed();
+    const at = Math.max(0, ...rs.map((r) => Date.parse(r.time) || 0));
+    const sessions = new Map(); // session → { last, first, rows }, rs newest first
+    for (const r of rs) {
+      const k = ctxSessionOf(r);
+      if (!k) continue;
+      const g = sessions.get(k);
+      if (g) { g.first = r; g.rows.push(r); } else sessions.set(k, { key: k, last: r, first: r, rows: [r] });
+    }
+    const live = [...sessions.values()]
+      .filter((g) => g.rows.some((r) => !r.done) || at - (Date.parse(g.last.time) || 0) <= CTX_LIVE)
+      .sort((a, b) => b.first.id - a.first.id).slice(0, CTX_SESS_MAX);
+    const showing = live.length > 1 && !!window.ctxStack;
+    ctxSess.hidden = !showing;
+    if (!showing) { if (ctxSess.firstChild) { ctxSess.replaceChildren(); ctxSessBlocks.clear(); } return; }
+    setAttr(ctxSess, "aria-label", t("Each session's context window"));
+    const on = logR && ctxSessionOf(logR);
+    const els = live.map((g) => {
+      let x = ctxSessBlocks.get(g.key);
+      if (!x) {
+        const b = el("button", "rt-ctx-s"), name = el("span", "nm"), sub = el("span", "sub");
+        b.type = "button";
+        b.append(name, sub);
+        x = { b, name, sub, bar: null };
+        ctxSessBlocks.set(g.key, x);
+      }
+      const r = g.last, p = r.prompt, w = p.window || 0;
+      const folder = g.rows.find((y) => y.folder)?.folder || "";
+      const title = g.rows.map(sessionName).find(Boolean) || "";
+      const id = groupSession(r) || r.conv || "";
+      setText(x.name, title || (folder ? lastLevel(folder) : "") || id.slice(0, 8) || agentName(r.agent));
+      setText(x.sub, agentName(r.agent) + " · " + window.ctxFmt(p.tokens) + (w ? " / " + window.ctxFmt(w) + " · " + Math.round(p.tokens / w * 100) + "%" : ""));
+      const bar = window.ctxStack(p);
+      if (!x.bar) { x.bar = bar; x.b.append(bar); }
+      else {
+        setAttr(x.bar, "aria-label", bar.getAttribute("aria-label"));
+        [...bar.children].forEach((i, n) => { const o = x.bar.children[n]; if (o && o.style.width !== i.style.width) o.style.width = i.style.width; });
+      }
+      setAttr(x.b, "title", [title, folder && t("Folder") + ": " + folder, id && t("Session id") + ": " + id, t("Show this session's newest request")].filter(Boolean).join("\n"));
+      setAttr(x.b, "aria-pressed", String(g.key === on));
+      x.b.onclick = () => { const n = listed().find((y) => ctxSessionOf(y) === g.key); if (n) pick(n); };
+      return x.b;
+    });
+    for (const k of [...ctxSessBlocks.keys()]) if (!live.some((g) => g.key === k)) ctxSessBlocks.delete(k);
+    if (els.length !== ctxSess.children.length || els.some((e, i) => ctxSess.children[i] !== e)) ctxSess.replaceChildren(...els);
   }
   // logoed puts the provider's logo before the first account, key or
   // provider a line of the story names, so who it is about reads at a
@@ -3419,7 +3499,7 @@ function routingPage(part) {
     namesBusy = true;
     let others = false;
     try { others = await refreshOtherNames(); } catch {} finally { namesBusy = false; }
-    if (others) { steady(renderHist); render(); }
+    if (others) { steady(renderHist); render(); renderLog(); }
     if (namesBusy || !shown()) return;
     const rs = listed().filter((r) => r.agent === "codex"), sourceDay = day, routeIDs = new Set(rs.map((r) => r.id));
     if (!rs.some(groupSession)) return;
@@ -3462,7 +3542,7 @@ function routingPage(part) {
         if ((r.sessionTitle || "") !== name) { r.sessionTitle = name; changed = true; }
         if (!r.parentMatched && (codexNames.get(id) || "") !== name) { if (name) codexNames.set(id, name); else codexNames.delete(id); changed = true; }
       }
-      if (changed) { steady(renderHist); render(); }
+      if (changed) { steady(renderHist); render(); renderLog(); }
     } catch {} finally { namesBusy = false; }
   }
   setInterval(refreshSessionNames, 15000);

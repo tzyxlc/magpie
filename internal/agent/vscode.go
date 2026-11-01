@@ -380,7 +380,7 @@ func vscodeKindAt(k vscodeKind, dir string) *Agent {
 				if v := cur["model"]; v != "" && v != "auto" && !usesMagpie(v) {
 					own = append(own, Option{Value: v, Icon: modelIcon("", v)})
 				}
-				return append(group(k.name, own), viaMagpie(k.id, magpieID+"/")...)
+				return withVia(group(k.name, own), k.id, magpieID+"/")
 			},
 		}},
 	}, path, models, stashPath())
@@ -487,7 +487,7 @@ func vscodeURL() string { return gatewayV1() + "/chat/completions" }
 // Code k is shown it.
 func vscodeGroupJSON(k vscodeKind, vendor string) map[string]any {
 	list := []any{}
-	for _, m := range magpieModels(k.id) {
+	for _, m := range sharedModels(k.id) {
 		context := m.Context
 		if context == 0 {
 			context = 128000 // what VS Code takes a model of unknown window for

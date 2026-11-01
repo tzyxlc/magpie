@@ -209,7 +209,7 @@ func claudeDesktop(home string) *Agent {
 					}
 					// a Desktop on magpie from before the servers were
 					// carried gets them once
-					if stashLoad()[desktopMCPSeen+p.key] == "" {
+					if stashShared()[desktopMCPSeen+p.key] == "" {
 						if err := desktopCarryMCP(p); err != nil {
 							errs = append(errs, err)
 						}
@@ -684,7 +684,7 @@ var desktopImportOn = map[string]any{"enabled": true, "bannerBehavior": "detect"
 // The mark is read, never unstashed: it outlives the check and a switch
 // off, or the next Sync would write the policy back.
 func desktopSeedImport(p desktopPaths) error {
-	if stashLoad()[desktopImport+p.key] != "" {
+	if stashShared()[desktopImport+p.key] != "" {
 		return nil
 	}
 	if desktopObject(p.prof) != nil {
@@ -735,7 +735,7 @@ func desktopCarryMCP(p desktopPaths) error {
 	}
 	have := desktopServers(p.config3p)
 	carried := map[string]json.RawMessage{}
-	if prev := stashLoad()[desktopMCP+p.key]; prev != "" {
+	if prev := stashShared()[desktopMCP+p.key]; prev != "" {
 		json.Unmarshal([]byte(prev), &carried)
 	}
 	merged := map[string]json.RawMessage{}

@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/ghtoken"
 	"github.com/yetone/magpie/internal/source"
 	"github.com/yetone/magpie/internal/update"
@@ -31,6 +32,12 @@ import (
 
 //go:embed market.json
 var builtinMarket []byte
+
+// builtinParsed is the built-in copy, parsed once; shared, so only read.
+var builtinParsed = sync.OnceValue(func() []Listing {
+	l, _ := parseMarket(builtinMarket)
+	return l
+})
 
 // MarketURL is where the list is kept; MAGPIE_PLUGIN_MARKET moves it, and
 // "off" keeps to the built-in copy.
@@ -795,11 +802,12 @@ func Icon(spec, id string) string {
 	l := marketList
 	marketMu.Unlock()
 	if l == nil {
-		if b, err := os.ReadFile(marketCache()); err == nil {
-			l, _ = parseMarket(b)
-		}
+		// parsed once for each copy, not for each plugin each look: the
+		// Providers page parsed it for every plugin's row each poll, 13 MB
+		// of what twenty polls allocated with real accounts
+		l, _ = filememo.Read("plugin-market", marketCache(), parseMarket)
 		if l == nil {
-			l, _ = parseMarket(builtinMarket)
+			l = builtinParsed()
 		}
 	}
 	pkg := Name(spec)

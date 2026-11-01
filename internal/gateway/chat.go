@@ -1518,7 +1518,7 @@ func stopFromChat(s string) string {
 		return "length"
 	case "tool_calls", "function_call":
 		return "tool"
-	case "content_filter":
+	case "content_filter", "sensitive": // "sensitive": Zhipu's filter
 		return "filter"
 	}
 	return "stop"

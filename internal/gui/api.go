@@ -1057,8 +1057,9 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			return
 		}
 		s := state()
-		writeJSON(rw, s)
-		keepState(s)
+		if sum, ok := writeStateJSON(rw, s); ok {
+			keepStateSummed(s, sum)
+		}
 	})
 	mux.HandleFunc("POST /api/set", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct{ Agent, Field, Value string }

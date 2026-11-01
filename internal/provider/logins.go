@@ -180,7 +180,7 @@ func LoginID(agent, user string) string {
 	return loginID(savedLogin{Agent: agent, User: user})
 }
 
-func loginsPath() string { return filepath.Join(filepath.Dir(Path()), "logins.json") }
+func loginsPath() string { return appdir.Join(filepath.Dir(Path()), "logins.json") }
 
 // lastLogins is the accounts last read from logins.json: a read that fails
 // (a file half there, one magpie can't open for a moment) is them, not no
@@ -214,6 +214,18 @@ func validLogins(b []byte) bool {
 }
 
 func readLogins() []savedLogin {
+	loginsCopied.Add(1)
+	return slices.Clone(sharedLogins()) // callers change theirs
+}
+
+// loginsCopied counts readLogins' copies, for a test.
+var loginsCopied atomic.Int64
+
+// sharedLogins is readLogins without the caller's own copy: the accounts
+// as kept, read only. A page's state lists a dozen agents' accounts, and
+// a copy of the whole list for each was 61 MB of what twenty window polls
+// allocated.
+func sharedLogins() []savedLogin {
 	if settings.AccountDiscoveryOff() {
 		return nil
 	}
@@ -243,7 +255,7 @@ func readLogins() []savedLogin {
 			log.Printf("logins.json: %v; %v", err, ferr)
 		}
 	}
-	return slices.Clone(ls) // callers change theirs
+	return slices.Clip(ls) // an append makes the caller's own
 }
 
 // unreadBytes are a file's bytes, nil when it can't be read: for the log
@@ -808,7 +820,7 @@ func sameRefresh(x, y json.RawMessage) bool {
 // accountRemoved: the user removed the agent's account from magpie, which
 // then neither saves its sign-ins nor keeps them renewed.
 func accountRemoved(agent string) bool {
-	return slices.ContainsFunc(load().Providers, func(p Provider) bool { return p.ID == agent && p.Hidden })
+	return slices.ContainsFunc(storedFile().Providers, func(p Provider) bool { return p.ID == agent && p.Hidden })
 }
 
 func rememberLogins(force bool) {
@@ -1007,7 +1019,9 @@ func Logins(agent string) []Login {
 	}
 	back := map[string]string{}
 	for a, user := range active {
-		if r, ok := loginReturnOf(a, user); ok {
+		// only where magpie goes back to it (returnsToFirst): a return
+		// kept from before stays on record, for In order or KeepLogin
+		if r, ok := loginReturnOf(a, user); ok && returnsToFirst(a) {
 			back[a] = r.Back
 		}
 	}

@@ -72,6 +72,18 @@ type candidate struct {
 	// members' busy failures, the group asked for only those that set none;
 	// 0 falls back to the asked group's Waits, PatienceOff skips replan
 	patience int
+	// member is the member of the group asked for it is of, as the group
+	// spells it (Member.Path[0]): a group in the group is one member.
+	// place is that member's place in the group's list, 1 for its first,
+	// 0 for one not of a group (planGroup): what the user put first is
+	// what a member listed after it stands in for (standsInFor)
+	member string
+	place  int
+	// reserve is set, to the provider's AtOnce, on an account or key held
+	// back past the first that many (keepAtOnce): tried after them, never
+	// given a request for want of a slot (laneMate) nor kept on by a
+	// conversation (affine)
+	reserve int
 }
 
 // capHold is how an account is held at its usage cap: the cap of the
@@ -223,6 +235,71 @@ func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, a
 // serve the model (provider.AccountModels, #474): never tried, whatever
 // else there is — none, when every one of them is.
 func perKeyBarred(p provider.Provider, model string, from provider.Protocol) (out, aside, left, barred []candidate) {
+	out, aside, left, barred = perKeyEvery(p, model, from)
+	out, aside = keepAtOnce(p.AtOnce(), out, aside)
+	return out, aside, left, barred
+}
+
+// keepAtOnce keeps, of a provider's accounts or keys routed over, the
+// first n in the user's own order (rank, the order the provider's page
+// shows and a drag sets), and holds the rest back as reserves: tried after
+// them, the way a key for another protocol is (aside), and marked so
+// (candidate.reserve). 01huadalang on Discord: ZCode bans the address
+// that three of its accounts are used from at once, while two are let
+// be, and In order alone still spread over all three under load (a full
+// lane gave way to the next account, laneMate, and every busy refusal
+// rested one). The ones kept are those not resting first, so an account
+// at the end of its quota hands its seat to the next in the list, and
+// gets it back once it is back; those resting fill seats only when fewer
+// than n are not. The user's order, not routing's, says who is first, so
+// the set stays the same request to request under In turn or By usage.
+// n of 0 keeps them all.
+func keepAtOnce(n int, out, aside []candidate) ([]candidate, []candidate) {
+	if n <= 0 || len(out)+len(aside) <= n {
+		return out, aside
+	}
+	all := append(slices.Clone(out), aside...)
+	byRank := make([]int, len(all))
+	for i := range byRank {
+		byRank[i] = i
+	}
+	slices.SortStableFunc(byRank, func(a, b int) int { return all[a].rank - all[b].rank })
+	resting := make([]bool, len(all))
+	for i, c := range all {
+		_, resting[i] = restingOf(c)
+	}
+	keep := make([]bool, len(all))
+	kept := 0
+	for _, rested := range []bool{false, true} {
+		for _, i := range byRank {
+			if kept < n && resting[i] == rested && !keep[i] {
+				keep[i], kept = true, kept+1
+			}
+		}
+	}
+	var reserves []candidate
+	for _, i := range byRank {
+		if !keep[i] {
+			c := all[i]
+			c.reserve = n
+			reserves = append(reserves, c)
+		}
+	}
+	keptOf := func(cs []candidate, from int) []candidate {
+		var o []candidate
+		for i, c := range cs {
+			if keep[from+i] {
+				o = append(o, c)
+			}
+		}
+		return o
+	}
+	return keptOf(out, 0), append(keptOf(aside, len(out)), reserves...)
+}
+
+// perKeyEvery is perKeyBarred with every account or key routed over, the
+// provider's AtOnce aside.
+func perKeyEvery(p provider.Provider, model string, from provider.Protocol) (out, aside, left, barred []candidate) {
 	if _, off := provider.ModelDisabled(p.ID, model); off || provider.DisabledUnknown() {
 		return nil, nil, nil, nil // the user disabled it (#1867): never planned, a fallback no more than the model asked
 	}
@@ -529,7 +606,23 @@ func (s *Server) planGroup(g provider.Group, ms []provider.Member, from provider
 	if len(out) == 0 {
 		return nil, pl
 	}
+	placed(ms, out)
+	placed(ms, pl.unlisted)
 	return restLast(out, pl)
+}
+
+// placed sets each of cs's place: where its member is in ms, the group's
+// models in the order its list has them, a group in the group by its first.
+func placed(ms []provider.Member, cs []candidate) {
+	at := map[string]int{}
+	for _, m := range ms {
+		if len(m.Path) > 0 && at[m.Path[0]] == 0 {
+			at[m.Path[0]] = len(at) + 1
+		}
+	}
+	for i := range cs {
+		cs[i].place = at[cs[i].member]
+	}
 }
 
 // innerFirstToken is the FirstToken of the innermost group m is in
@@ -568,6 +661,9 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 				l[i].effort, l[i].levels, l[i].fast = m.Effort, m.Levels, m.Fast
 				l[i].firstToken = innerFirstToken(m)
 				l[i].patience = innerPatience(m)
+				if len(m.Path) > 0 {
+					l[i].member = m.Path[0]
+				}
 			}
 		}
 		pl.left = append(pl.left, barredOf(barred, m.Provider, false, from, m.Groups())...)
@@ -1959,6 +2055,12 @@ type holdWriter struct {
 	// upstreamKeys are the headers of the vendor's reply heardUpstream put
 	// in header (#4145)
 	upstreamKeys []string
+
+	// over, when another candidate stands behind the try, reads what
+	// passes before its answer begins for a refusal to hand to the next
+	// one in the same stream (refusalHandover); handedOver says it was
+	over       *refusalHandover
+	handedOver bool
 }
 
 // onLoop sets what is told of a loop before it ends the reply (reask),
@@ -2053,6 +2155,9 @@ func (h *holdWriter) Write(b []byte) (int, error) {
 	if h.looped != "" || h.relooped {
 		return 0, errLooped
 	}
+	if h.handedOver {
+		return 0, errHandedOver
+	}
 	if h.status == 0 {
 		h.writeHeader(http.StatusOK)
 	}
@@ -2087,6 +2192,14 @@ func (h *holdWriter) Write(b []byte) (int, error) {
 			}
 		}
 	}
+	if h.overActive() {
+		// nothing said yet: a refusal is handed to the next candidate
+		h.passOver(b)
+		if h.handedOver {
+			return 0, errHandedOver
+		}
+		return len(b), nil
+	}
 	if h.first.first != 0 || h.passing {
 		h.refusalAfter(b)
 	}
@@ -2097,6 +2210,9 @@ func (h *holdWriter) Write(b []byte) (int, error) {
 	n, err := h.held.Write(b)
 	if h.stream && h.failure == 0 {
 		h.scan()
+	}
+	if h.handedOver {
+		return 0, errHandedOver
 	}
 	return n, err
 }
@@ -2627,11 +2743,21 @@ func mayRefuse(ev []byte) bool {
 var refusalSays = [][]byte{
 	[]byte(`error`), []byte(`failed`), []byte(`refusal`), []byte(`filter`),
 	[]byte(`incomplete`), []byte(`finishReason`), []byte(`blockReason`),
+	[]byte(`"sensitive"`), // Zhipu's finish_reason
 }
 
 // flow lets a held stream through, and what follows it.
 func (h *holdWriter) flow() {
+	if h.handedOver {
+		return
+	}
 	h.pass()
+	if h.overActive() {
+		held := bytes.Clone(h.held.Bytes())
+		h.held.Reset()
+		h.passOver(held)
+		return
+	}
 	h.sent(h.held.Bytes())
 	h.w.Write(h.held.Bytes())
 	h.held.Reset()
@@ -3051,11 +3177,17 @@ var filterReasons = map[string]string{
 	// agent took it for a failed sign-in (sweanng on Discord, ZCode:
 	// "Provider authentication failed", reason=auth_failed status=403)
 	"content_policy_rejected": "content_policy_rejected",
-	"SAFETY":                  "safety",
-	"PROHIBITED_CONTENT":      "safety",
-	"BLOCKLIST":               "safety",
-	"SPII":                    "safety",
-	"IMAGE_SAFETY":            "safety",
+	// Zhipu's finish_reason when its filter stops GLM's reply, and
+	// DashScope's error code when Alibaba's stops Qwen's: both after the
+	// reasoning went to the agent, which had it end there (yhwangl on X)
+	"sensitive":              "sensitive",
+	"data_inspection_failed": "data_inspection_failed",
+	"DataInspectionFailed":   "data_inspection_failed",
+	"SAFETY":                 "safety",
+	"PROHIBITED_CONTENT":     "safety",
+	"BLOCKLIST":              "safety",
+	"SPII":                   "safety",
+	"IMAGE_SAFETY":           "safety",
 }
 
 // finishFailed is what a 200 stream the vendor ends with finish_reason
@@ -3463,6 +3595,12 @@ func errorCode(raw json.RawMessage) string {
 // risk"), cyber_policy and the like (#248).
 var policyCode = regexp.MustCompile(`^[a-z]+_policy$`)
 
+// sensitiveCode is how Volcengine Ark's errors say its filter refused the
+// input or the reply: InputTextSensitiveContentDetected,
+// OutputTextSensitiveContentDetected, SensitiveContentDetected and the
+// image and video kinds of them.
+var sensitiveCode = regexp.MustCompile(`SensitiveContentDetected$`)
+
 // flaggedWords are how OpenAI's invalid_prompt says the prompt was held to
 // its usage policy, rather than malformed.
 var flaggedWords = regexp.MustCompile(`(?i)flagged|usage polic`)
@@ -3510,8 +3648,11 @@ func policyRefusal(raw []byte) (string, bool) {
 	switch r, ok := filterReasons[c]; {
 	case ok:
 		return note(r)
-	case policyCode.MatchString(c):
+	case policyCode.MatchString(c), sensitiveCode.MatchString(c):
 		return note(c)
+	case c == "1301" && strings.Contains(msg, "敏感"):
+		// Zhipu's: "系统检测到输入或生成内容可能包含不安全或敏感内容"
+		return note("sensitive")
 	case c == "invalid_prompt" && flaggedWords.MatchString(msg):
 		return note(c)
 	case strings.TrimSpace(msg) == highRiskRefusal:

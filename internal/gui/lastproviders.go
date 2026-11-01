@@ -1,7 +1,6 @@
 package gui
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -28,6 +27,7 @@ var lastProviders struct {
 	sync.Mutex
 	kept []byte
 	read bool
+	sum  [32]byte // kept's keptSum
 }
 
 type providersFile struct {
@@ -48,7 +48,8 @@ func keepProviders(s providersJSON) {
 		ps[i] = p
 	}
 	s.Providers = ps
-	b, err := json.Marshal(providersFile{Version: Version, Providers: s})
+	f := providersFile{Version: Version, Providers: s}
+	sum, err := encodedSum(f) // as keepState's: no copy to compare
 	if err != nil {
 		return
 	}
@@ -56,12 +57,17 @@ func keepProviders(s providersJSON) {
 	defer lastProviders.Unlock()
 	if !lastProviders.read {
 		lastProviders.kept, _ = os.ReadFile(lastProvidersPath())
-		lastProviders.read = true
+		lastProviders.read, lastProviders.sum = true, keptSum(lastProviders.kept)
 	}
-	if bytes.Equal(b, lastProviders.kept) {
+	if sum == lastProviders.sum {
 		return
 	}
-	lastProviders.kept = b
+	keptMarshaled.Add(1)
+	b, err := json.Marshal(f)
+	if err != nil {
+		return
+	}
+	lastProviders.kept, lastProviders.sum = b, sum
 	// only this user's to read: it names their accounts
 	if _, err := os.Stat(lastProvidersPath()); os.IsNotExist(err) {
 		os.MkdirAll(filepath.Dir(lastProvidersPath()), 0o700)
@@ -76,7 +82,7 @@ func lastKnownProviders() (json.RawMessage, bool) {
 	lastProviders.Lock()
 	if !lastProviders.read {
 		lastProviders.kept, _ = os.ReadFile(lastProvidersPath())
-		lastProviders.read = true
+		lastProviders.read, lastProviders.sum = true, keptSum(lastProviders.kept)
 	}
 	b := lastProviders.kept
 	lastProviders.Unlock()

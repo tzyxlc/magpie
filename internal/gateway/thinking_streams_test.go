@@ -32,7 +32,15 @@ func (s *slowThinker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.sent = append(s.sent, time.Now())
 		time.Sleep(s.gap)
 	}
-	s.done <- time.Now()
+	// a try that is asked again serves the same fake vendor a second
+	// time; the channel holds one send, so a second handler would block
+	// here forever and hold the reply it serves open, the package hung
+	// on the server's Close with it until go test's own timeout (#4530,
+	// Jackzigen). The tests read the time once; later sends can drop.
+	select {
+	case s.done <- time.Now():
+	default:
+	}
 }
 
 var glmThinksSlowly = []string{
@@ -283,19 +291,69 @@ func TestDeepSeekRefusalHoldsATrustedMemberAgain(t *testing.T) {
 			t.Fatalf("warm-up %d: %d %s (a %d, b %d)", i+1, code, body, a.n, b.n)
 		}
 	}
-	// trusted, the refusal's reasoning went through and ended the reply
-	// with it, the try recorded done/200 as itspig's was; a reply that has
-	// begun is nobody's to take back, so nobody else is asked
-	if code, body := sendTo(s, "/v1/messages", claudeCodeAsk); code != 200 || !strings.Contains(body, "The user is asking") || strings.Contains(body, "from b") || a.n != thoughtCleanMost+1 || b.n != 0 {
+	// trusted, the refusal's reasoning went through as it came, and the
+	// refusal after it, with nothing yet said, went to the next member,
+	// whose answer follows the reasoning in the same stream (refusalHandover)
+	if code, body := sendTo(s, "/v1/messages", claudeCodeAsk); code != 200 || !strings.Contains(body, "The user is asking") || !strings.Contains(body, "from b") || a.n != thoughtCleanMost+1 || b.n != 1 {
 		t.Fatalf("trusted refusal: %d %s (a %d, b %d)", code, body, a.n, b.n)
 	}
 	// and the member is held again: the same refusal now goes to the next
 	// member, its reasoning with nothing shown
-	if code, body := sendTo(s, "/v1/messages", claudeCodeAsk); code != 200 || !strings.Contains(body, "from b") || strings.Contains(body, "The user is asking") || a.n != thoughtCleanMost+2 || b.n != 1 {
+	if code, body := sendTo(s, "/v1/messages", claudeCodeAsk); code != 200 || !strings.Contains(body, "from b") || strings.Contains(body, "The user is asking") || a.n != thoughtCleanMost+2 || b.n != 2 {
 		t.Fatalf("held again: %d %s (a %d, b %d)", code, body, a.n, b.n)
 	}
 	if r := lastRoute(s); len(r.Tries) != 2 || r.Tries[0].Fail != failRefused || r.Tries[1].Fail != "" {
 		t.Fatalf("tries: %+v", r.Tries)
+	}
+}
+
+// A try that is asked again asks the same fake vendor again: a reply
+// that only reasoned is asked again in place (#667), and a full run's
+// state may have any ask retried. The fake's done holds one send, and
+// the ask's first serve has filled it: a second handler that blocks on
+// the send never returns, the reply it serves never ends, and the
+// package hangs on vendor's Close until go test's own timeout (#4530).
+// Asked again, the fake must serve to its end regardless.
+func TestThinkingVendorAskedAgainStillEnds(t *testing.T) {
+	fresh(t)
+	thinks := []string{
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"first thought","thought":true}]}}],"modelVersion":"gemini-3-pro"}`,
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":" second thought","thought":true}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"thoughtsTokenCount":8},"modelVersion":"gemini-3-pro"}`,
+	}
+	up := &slowThinker{events: thinks, gap: 0, done: make(chan time.Time, 1)}
+	vendor := httptest.NewServer(up)
+	t.Cleanup(vendor.Close)
+	p := provider.Provider{ID: "relay", Name: "Relay", Key: "k", Models: []string{"gemini-3-pro"}}
+	p.Gemini = vendor.URL + "/v1beta"
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	gw := httptest.NewServer(New().Handler())
+	t.Cleanup(gw.Close)
+
+	res, err := http.Post(gw.URL+"/v1/messages", "application/json",
+		strings.NewReader(strings.Replace(claudeCodeAsk, "group/g", "relay/gemini-3-pro", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	// the reply that said nothing is asked again in place: read it to its
+	// end, whichever try ends it — a handler stuck on done never ends it
+	rd := bufio.NewReader(res.Body)
+	for {
+		if _, err := rd.ReadString('\n'); err != nil {
+			break
+		}
+	}
+	select {
+	case <-up.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the vendor never finished")
+	}
+	// the ask-again came: the second serve went to its end, its events
+	// noted after the first serve's
+	if len(up.sent) < 2*len(thinks) {
+		t.Fatalf("the vendor served %d events of %d asks, the ask-again never ended", len(up.sent), 2)
 	}
 }
 

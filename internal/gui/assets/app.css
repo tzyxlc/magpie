@@ -1068,6 +1068,10 @@ body.window .field.solo { grid-column: auto; }
 .quota-own .own-badge { margin-left: 0; }
 .subscription-card.several .quota-keyline + .subscription-account { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); }
 .reset-ask .reset-idle { color: var(--amber); }
+/* which of an account's resets is used, the soonest unless another is picked */
+.reset-ask .reset-pick { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 2px 0 10px; font-size: 12px; color: var(--muted); }
+.reset-ask .reset-pick .sess-pick { max-width: 100%; }
+.reset-ask .reset-sooner { color: var(--amber); }
 /* a WorkBuddy account's daily check-in on its Usage card (#694) */
 .wb-checkin { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .wb-checkin .ci-say { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
@@ -2426,7 +2430,14 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 /* Providers' search (#1614): a toolbar field over the list, at its right
    edge as Settings' is; across the page when the window is narrow. While
    searching, the Turned off fold stays open on the ones that match. */
-#view-providers .pv-head { display: flex; justify-content: flex-end; margin: 0 0 10px; flex: none; }
+#view-providers .pv-head { display: flex; justify-content: flex-end; gap: 8px; margin: 0 0 10px; flex: none; }
+/* Hide accounts, on Routing, Usage and (its own switch) Providers. On, it
+   says so in its struck eye and its words, a shade darker: a page tool,
+   not a banner */
+.rt-mask { display: inline-flex; align-items: center; gap: 5px; }
+#view-providers .pv-head > .rt-mask { flex: none; }
+.rt-mask svg { width: 13px; height: 13px; flex: none; }
+.rt-mask[aria-pressed="true"] { color: var(--fg-2); }
 #view-providers .pv-q { flex: 0 1 220px; min-width: 120px; }
 #view-providers .pv-none { margin: 18px 2px; }
 #view-providers .off-head .fold:disabled { cursor: default; opacity: 1; }
@@ -2639,6 +2650,25 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .accts > :is(.keep-login, .switch-only, .pool-ends) + .acc { border-top: 1px solid var(--line-2); }
 .editor .accts .keep-login, .editor .accts .switch-only, .editor .accts .pool-ends { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 34px; padding: 6px 11px; font-size: 12px; border-top: 1px solid var(--line-2); }
 .editor .accts .keep-login .keep-as { max-width: 240px; }
+/* Claude Code's interactive mode or -p, with why (claudeModeRow) */
+.claude-mode { display: contents; }
+.cc-run { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-height: 26px; }
+.cc-pill { display: inline-flex; align-items: center; gap: 7px; height: 26px; padding: 0 10px 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); font-size: 12px; color: var(--fg); cursor: default; }
+.cc-pill:hover { border-color: var(--muted); }
+.cc-pill:focus-visible { border-color: var(--muted); }
+.cc-pill i { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+.cc-pill.tui i { background: var(--green); }
+.cc-said { font-size: 12px; color: var(--muted); }
+.cc-tip { position: fixed; z-index: 1000; width: min(400px, calc(100vw - 16px)); padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--card); box-shadow: 0 12px 32px rgba(0, 0, 0, .18); font-size: 12px; line-height: 1.5; color: var(--fg); pointer-events: none; animation: mask-tip .16s var(--ease); }
+.cc-m + .cc-m { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--line-2); }
+.cc-m .h { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+.cc-m .now { padding: 0 6px; border-radius: 5px; background: var(--green-soft); color: var(--green); font-size: 11px; line-height: 17px; }
+.cc-m p { margin: 2px 0 0; color: var(--muted); }
+.cc-m p.good, .cc-m p.bad { padding-left: 14px; text-indent: -14px; color: var(--fg-2); }
+.cc-m p.good::before, .cc-m p.bad::before { display: inline-block; width: 14px; text-indent: 0; content: "+"; color: var(--green); font-weight: 600; }
+.cc-m p.bad::before { content: "−"; color: var(--muted); }
+.cc-tip .foot { margin-top: 9px; padding-top: 7px; border-top: 1px solid var(--line-2); font-size: 11px; color: var(--faint); }
+@media (prefers-reduced-motion: reduce) { .cc-tip { animation: none; } }
 .editor .accts .pool-ends .note { flex-basis: 100%; color: var(--fg-2); }
 .acc .n { font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acc .plan { color: var(--muted); font-size: 11px; padding: 1px 6px; border-radius: 5px; background: var(--pill); white-space: nowrap; }
@@ -3139,6 +3169,13 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .editor .acct-proxy-tools .acct-proxy-filter { flex: 1 1 auto; min-width: 0; }
 .editor .acct-proxy-tools .text { flex: none; }
 .editor .acct-proxies > .acct-proxy-more { justify-self: start; }
+/* the login of a SOCKS proxy in the rows outside Settings (#3382): the
+   fields Settings' own row has, stacked under, so an account line is no
+   wider; off keeps its room as the address beside the options does */
+.editor .proxy-auth.proxy-login { justify-content: flex-start; }
+.editor .proxy-auth.proxy-login input.proxy-credential { width: 140px; max-width: 100%; min-width: 0; }
+.editor .proxy-auth.proxy-login.off { visibility: hidden; }
+.signing .callback-form .proxy-login { flex-basis: 100%; }
 /* what a balance token's URL wants instead, and a balance checked in the form */
 .editor .bal-fix { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 6px; font-size: 12px; line-height: 1.45; color: var(--muted); }
 .editor .bal-fix:empty { display: none; }
@@ -3962,6 +3999,7 @@ body.panel .modal { padding: 16px 12px; }
   body.web .usage-head > .segs { max-width: 100%; flex-wrap: wrap; }
   body.web .usage-head > .grow, body.web .sess-tools > .grow { display: none; }
   body.web .sess-filter { order: 1; flex: 1 1 100%; width: 100%; }
+  body.web .pv-head > .rt-mask { order: 2; }
   body.web .sess-pick { min-height: 44px; max-width: 100%; font-size: 14px; }
   body.web .stats, body.web .stats.six { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   body.web .kpi small { white-space: normal; overflow: visible; overflow-wrap: anywhere; }

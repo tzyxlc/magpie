@@ -225,7 +225,7 @@ func dshAt(at place) *Agent {
 						own[i].Direct = "DeepSeek"
 					}
 				}
-				return append(own, viaMagpie("dsh", magpieID+"/")...)
+				return withVia(own, "dsh", magpieID+"/")
 			},
 		}, {
 			// the thinking effort sessions start with: agent-default-model's
@@ -758,7 +758,7 @@ func dshWired(items []dshItem) bool { return len(dshRoutesIn(items)) > 0 }
 // written again would list it, where one naming a model magpie no longer
 // gives dsh would not.
 func dshServes(id string) bool {
-	for _, m := range magpieModels("dsh") {
+	for _, m := range sharedModels("dsh") {
 		if m.ID == id {
 			return true
 		}
@@ -891,7 +891,7 @@ func dshCheck(dir, gw string) string {
 	// for the round to write it from. A profile taken off magpie for real,
 	// its start with it, is said as before, and so is one still on the old
 	// wiring, which dshSync moves rather than this round writing beside.
-	canWriteBack := len(magpieModels("dsh")) > 0
+	canWriteBack := len(sharedModels("dsh")) > 0
 	for _, f := range files[1:] {
 		_, items, err := dshRead(f)
 		if err != nil || dshWired(dshOver(dir, items)) {
@@ -997,7 +997,7 @@ func dshCheck(dir, gw string) string {
 // nothing can (no catalog to write it from — the key check still runs, since
 // a route written without its key would fail the turn all the same).
 func dshCheckStripped(dir, gw string) string {
-	if len(magpieModels("dsh")) == 0 {
+	if len(sharedModels("dsh")) == 0 {
 		return "DeepSeek Harness starts on one of magpie's models, but magpie's route is out of " + dshHomePatch(dir) + " and the profiles' and there is no model list to write it back from; pick a model of magpie's again once it has one"
 	}
 	env := filepath.Join(dir, ".env")
@@ -1555,6 +1555,9 @@ func dshPutProviders(providers *yaml.Node, on bool, models []catalog.Model, gw s
 		if cur := yamlKey(providers, k.key); cur != nil && cur.Kind == yaml.MappingNode {
 			dshKeepCompat(cur, &route)
 			for j := 0; j+1 < len(route.Content); j += 2 {
+				if route.Content[j].Value == dshIdleKey && yamlKey(cur, dshIdleKey) != nil {
+					continue // the user's own wait, or the one magpie wrote
+				}
 				yamlSetKey(cur, route.Content[j].Value, route.Content[j+1])
 			}
 		} else {
@@ -1612,7 +1615,27 @@ type dshPiRoute struct {
 	API         string       `yaml:"api"`
 	BaseURL     string       `yaml:"baseURL"`
 	Models      []dshPiModel `yaml:"models"`
+	// StreamIdleTimeoutMs is dshIdleWait.
+	StreamIdleTimeoutMs int `yaml:"streamIdleTimeoutMs,omitempty"`
 }
+
+// dshIdleWait is how long llm-pi-ai waits on magpie's route for the next
+// event of a reply before it gives the turn up, in ms: the gateway's own
+// wait for a reply's headers (upstreamHeaderWait, 10 minutes). llm-pi-ai's
+// own is 5 minutes (DEFAULT_STREAM_IDLE_TIMEOUT_MS, 0.1.5 to 0.2.2), and
+// it counts pi-ai's events only: the ": keepalive" comments the gateway
+// sends while a request waits in a provider's queue (keepQueued) or on a
+// slow first byte (keepQuiet) aren't events, and pi-ai has none before the
+// reply's headers. So a turn queued behind dsh's own title request on a
+// plugin that serves one at a time (magpie-gemini-web, maxConcurrency 1)
+// was cut at 5 minutes, recorded as 499, while magpie and the plugin were
+// still within their waits (tim on Discord). Codex's comment-blind limit
+// is met by agentQuietMost in the gateway; dsh's is a setting of the
+// route. A value already on the route (one set in dsh, or by hand) stays.
+const dshIdleWait = 600000
+
+// dshIdleKey is the route's field dshIdleWait goes in.
+const dshIdleKey = "streamIdleTimeoutMs"
 
 // dshPiModel is one model of the route. Without contextWindow and maxTokens
 // dsh takes every model for a 128K one writing 16K at most, and without
@@ -1631,9 +1654,13 @@ type dshPiModel struct {
 // pi-ai asks a model for a thinking budget unless forceAdaptiveThinking is
 // set, and a Claude that thinks only adaptively turns a budget away. Z.ai's
 // GLM-5.2 and GLM-5.3 are told so too: a budget can't ask them for max
-// (dshKindConfig).
+// (dshKindConfig). On OpenAI's Responses API supportsStrictMode has pi-ai
+// say strict: false on an ordinary tool: with strict left out the API
+// normalizes a tool's schema as a strict-mode one, where every property is
+// required, and a tool's optional parameters come back filled (#3055).
 type dshPiCompat struct {
 	ForceAdaptiveThinking bool `yaml:"forceAdaptiveThinking,omitempty"`
+	SupportsStrictMode    bool `yaml:"supportsStrictMode,omitempty"`
 }
 
 // dshAPIs are the wire protocols of llm-pi-ai's (pi-ai's api names) a route
@@ -1790,7 +1817,7 @@ func dshModelLevels(efforts []string) ([]string, *dshPiLevels) {
 
 // dshLevels are the thinking levels dsh offers for a catalog model.
 func dshLevels(ref string) []string {
-	for _, m := range magpieModels("dsh") {
+	for _, m := range sharedModels("dsh") {
 		if m.ID == ref {
 			levels, _ := dshModelLevels(m.Efforts)
 			return levels
@@ -1840,7 +1867,7 @@ func dshRouteConfig(models []catalog.Model, api, gw string) dshPiRoute {
 // thinking adaptively, output_config.effort on Messages.
 func dshKindConfig(k dshKind, models []catalog.Model, api, gw string) dshPiRoute {
 	api = dshAPI(api, k.api)
-	r := dshPiRoute{DisplayName: k.name, APIKeyEnv: dshKeyRef, API: api, BaseURL: dshBaseURL(api, gw), Models: []dshPiModel{}}
+	r := dshPiRoute{DisplayName: k.name, APIKeyEnv: dshKeyRef, API: api, BaseURL: dshBaseURL(api, gw), Models: []dshPiModel{}, StreamIdleTimeoutMs: dshIdleWait}
 	for _, m := range models {
 		e := dshPiModel{ID: m.ID, Name: m.Name, ContextWindow: m.Context}
 		if m.Output > 0 {
@@ -1853,11 +1880,20 @@ func dshKindConfig(k dshKind, models []catalog.Model, api, gw string) dshPiRoute
 			e.Input = []string{"text"}
 		}
 		_, e.ReasoningEfforts = dshModelLevels(m.Efforts)
+		// each switch is magpie's own, put as magpie has it now: a user's
+		// hand-set one of the same name says what magpie writes again says
+		switch {
 		// pi-ai's budget path clamps max to high (16384), so a model that
 		// takes adaptive thinking with its level (Z.ai's GLM-5.3) is asked
 		// adaptively too: pi-ai then sends the level itself, max as max
-		if api == "anthropic-messages" && (gateway.AdaptiveThinking(m.ID) || gateway.AdaptiveWithEffort(m.ID)) {
+		case api == "anthropic-messages" && (gateway.AdaptiveThinking(m.ID) || gateway.AdaptiveWithEffort(m.ID)):
 			e.Compat = &dshPiCompat{ForceAdaptiveThinking: true}
+		case api == "openai-responses":
+			// by the api the route stands on (the one the user picked in
+			// dsh's Models page kept), not by its name: a tool of a turn
+			// asked there with strict left out has every property taken as
+			// required, its optional ones filled (#3055)
+			e.Compat = &dshPiCompat{SupportsStrictMode: true}
 		}
 		r.Models = append(r.Models, e)
 	}

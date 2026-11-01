@@ -87,7 +87,12 @@ func codexAppRoute() (route string, out, known bool) {
 	defer filememo.Hold()()
 	home, _ := homes()
 	a := codex(home)
-	if _, err := os.ReadFile(a.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	// opened, not read: a config.toml of 1.5 MB (Codex keeps every
+	// project's trust level in it) read whole every 3s was 1.55 GB of a
+	// live magpie's 33 GB in 53 minutes; the keys below come from filememo
+	if f, err := os.Open(a.Path); err == nil {
+		f.Close()
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return "", false, false
 	}
 	out = a.AppOut != nil && a.AppOut()
@@ -252,6 +257,7 @@ func onMachine(home, cfg string) []*Agent {
 		empryo(home),
 		ante(home),
 		astrbot(home),
+		qwenpaw(home),
 		openClaw(home),
 		jcode(home),
 		miniMax(home),
@@ -278,7 +284,7 @@ func onMachine(home, cfg string) []*Agent {
 		cindy(),
 		aionui(),
 		lody(home),
-	}, ompProfiles(home)...)
+	}, append(ompProfiles(home), qwenpawAgents(home)...)...)
 }
 
 // ---- accessors -------------------------------------------------------------
@@ -440,32 +446,47 @@ func ownOptionsFrom(native func(p string) []catalog.Model, authFile string, cur 
 	sort.Strings(providers)
 	var out []Option
 	for _, p := range providers {
-		name := catalog.ProviderName(p)
-		if name == "" {
-			name = nativeProviderNames[p]
+		if native == nil {
+			out = append(out, ownBuilt.shared(p, func() []Option { return ownProvider(nil, p) })...)
+		} else {
+			out = append(out, ownProvider(native, p)...)
 		}
-		if name == "" {
-			name = p
-		}
-		var ms []catalog.Model
-		if native != nil {
-			ms = native(p)
-		}
-		if len(ms) == 0 {
-			ms = catalog.Provider(p)
-		}
-		if len(ms) == 0 {
-			ms = codexServed(p)
-		}
-		opts := group(name, options(ms, p+"/"))
-		if ic := providerIcon(p); ic != "" {
-			for i := range opts {
-				opts[i].GroupIcon = ic
-			}
-		}
-		out = append(out, opts...)
 	}
 	return out
+}
+
+// ownBuilt is ownProvider's options built last per provider, for agents
+// without a registry of their own: Goose's model field asked them each
+// poll, for the picker and again for Drift, each provider's models made
+// into options anew, 20 MB of forty polls with real accounts.
+var ownBuilt stampedLists[Option]
+
+// ownProvider is the options of one provider an agent reaches on its own.
+func ownProvider(native func(p string) []catalog.Model, p string) []Option {
+	name := catalog.ProviderName(p)
+	if name == "" {
+		name = nativeProviderNames[p]
+	}
+	if name == "" {
+		name = p
+	}
+	var ms []catalog.Model
+	if native != nil {
+		ms = native(p)
+	}
+	if len(ms) == 0 {
+		ms = catalog.Provider(p)
+	}
+	if len(ms) == 0 {
+		ms = codexServed(p)
+	}
+	opts := group(name, options(ms, p+"/"))
+	if ic := providerIcon(p); ic != "" {
+		for i := range opts {
+			opts[i].GroupIcon = ic
+		}
+	}
+	return opts
 }
 
 // ---- agents ----------------------------------------------------------------
@@ -488,7 +509,10 @@ func magpieProviderJSONAt(shape, catalog, gw string) any {
 	models := magpieModels(catalog) // the catalog is the agent's
 	switch shape {
 	case "opencode":
-		ms := map[string]any{}
+		// models in the order magpieModels has them (#4575): OpenCode lists
+		// the models in the file's key order, and a map's keys marshal
+		// sorted — the variants under each kept theirs since #713
+		ms := orderedJSON{}
 		for _, m := range models {
 			e := map[string]any{"name": m.Name}
 			// modalities alone says a model takes images: OpenCode 1 takes
@@ -514,7 +538,7 @@ func magpieProviderJSONAt(shape, catalog, gw string) any {
 			if p := m.Price; p != nil {
 				e["cost"] = map[string]any{"input": p.Input, "output": p.Output, "cache_read": p.CacheRead, "cache_write": p.CacheWrite}
 			}
-			ms[m.ID] = e
+			ms = append(ms, jsonPair{m.ID, e})
 		}
 		return map[string]any{"npm": "@ai-sdk/openai-compatible", "name": "magpie",
 			"options": map[string]any{"baseURL": gw + "/v1", "apiKey": openCodeKeyAt(catalog, gw)}, "models": ms}
@@ -604,12 +628,16 @@ func openCodeKept(path string, value func() any) func() any {
 		}
 		var have map[string]json.RawMessage
 		block, _ := v.(map[string]any)
-		ms, _ := block["models"].(map[string]any)
+		ms, _ := block["models"].(orderedJSON)
 		if json.Unmarshal([]byte(raw), &have) != nil || ms == nil {
 			return v
 		}
 		for id, h := range have {
-			e, _ := ms[id].(map[string]any)
+			i := slices.IndexFunc(ms, func(p jsonPair) bool { return p.k == id })
+			if i < 0 {
+				continue
+			}
+			e, _ := ms[i].v.(map[string]any)
 			ours, ok := e["variants"].(orderedJSON)
 			var was struct {
 				Variants json.RawMessage `json:"variants"`
@@ -701,7 +729,12 @@ func piModelJSON(m catalog.Model, gw string, native bool) map[string]any {
 	switch {
 	case !native:
 	case slices.Contains(m.APIs, string(provider.Responses)):
+		// strict left out of a tool of a turn asked there is taken as a
+		// strict-mode schema, every property required, optional ones
+		// filled (#3055): pi-ai says strict: false on an ordinary tool
+		// only when the model's compat says so
 		e["api"] = "openai-responses"
+		e["compat"] = map[string]any{"supportsStrictMode": true}
 	case slices.Contains(m.APIs, string(provider.Anthropic)):
 		e["api"], e["baseUrl"] = "anthropic-messages", gw
 		if gateway.AdaptiveThinking(m.ID) {
@@ -967,7 +1000,7 @@ func openCodeLike(at place, id, name, icon, bin, dir, auth string, ua []string, 
 	provider := openCodeKept(path, func() any { return magpieProviderJSONAt("opencode", id, at.gw()) })
 	opts := func(key string) func(map[string]string) []Option {
 		return func(cur map[string]string) []Option {
-			return append(ownOptions(auth, cur[key]), viaMagpie(id, magpieID+"/")...)
+			return withVia(ownOptions(auth, cur[key]), id, magpieID+"/")
 		}
 	}
 	get := func(k string) string { v, _ := edit.GetJSON(path, k); return v }
@@ -1383,7 +1416,7 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 					return piScopeWith(path, v)
 				},
 				Options: func(cur map[string]string) []Option {
-					return append(ownOptionsFrom(piRegistry(id), auth, cur["model"]), viaMagpie(id, magpieID+"/")...)
+					return withVia(ownOptionsFrom(piRegistry(id), auth, cur["model"]), id, magpieID+"/")
 				},
 			},
 			{
@@ -1503,7 +1536,7 @@ func gooseIn(at place, cfg string) *Agent {
 				// only the native providers this goose is set up with (#987:
 				// every one of four was listed, OpenRouter's hundreds of
 				// models on a goose that had only magpie)
-				return append(ownOptions("", cur["model"], gooseConfigured(path, keyEnv)...), viaMagpie("goose", gooseProviderID+"/")...)
+				return withVia(ownOptions("", cur["model"], gooseConfigured(path, keyEnv)...), "goose", gooseProviderID+"/")
 			},
 		}, {
 			// GOOSE_THINKING_EFFORT, the effort goose asks of a model that
@@ -1624,6 +1657,15 @@ func copilot(home string) *Agent {
 // product.json of its own. A link on PATH is judged where it points.
 // A copilot a user installed itself, in npm's global folder, Homebrew's,
 // winget's Links or scoop's shims, is still the CLI.
+//
+// VS Code's versioned Windows layout (1.139's win32VersionedUpdate) moves
+// that product.json one level under the install root: the app's payload
+// lives in a folder named for the build's commit — the short hash, ten
+// lowercase hex digits, 2c33b50b16 for 1.144.0 — with resources\app under
+// it and bin beside it (microsoft/vscode#343045; Tony-ooo's 1.144.0, whose
+// every product.json the six places above miss, #3269). A folder of the
+// user's beside bin is not named as a commit's short hash is, so the cap
+// keeps its meaning: nothing wider than the same three folders is read.
 func editorLauncher(bin string) bool {
 	if real, err := filepath.EvalSymlinks(bin); err == nil {
 		bin = real
@@ -1637,6 +1679,14 @@ func editorLauncher(bin string) bool {
 			isFile(filepath.Join(dir, "resources", "app", "product.json")) {
 			return true
 		}
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() && commitHashName(e.Name()) &&
+					isFile(filepath.Join(dir, e.Name(), "resources", "app", "product.json")) {
+					return true
+				}
+			}
+		}
 		up := filepath.Dir(dir)
 		if up == dir {
 			break
@@ -1644,6 +1694,20 @@ func editorLauncher(bin string) bool {
 		dir = up
 	}
 	return false
+}
+
+// commitHashName is whether a folder is named as a build's short commit
+// hash is: ten lowercase hexadecimal digits (16507d91be, 2c33b50b16).
+func commitHashName(name string) bool {
+	if len(name) != 10 {
+		return false
+	}
+	for _, c := range []byte(name) {
+		if c < '0' || c > '9' && c < 'a' || c > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 func crush(home, cfg string) *Agent {
@@ -1721,7 +1785,7 @@ func crushAt(at place, path, data string) *Agent {
 					}
 				}
 			}
-			return append(ownOptions("", cur[key], extra...), viaMagpie("crush", magpieID+"/")...)
+			return withVia(ownOptions("", cur[key], extra...), "crush", magpieID+"/")
 		}
 	}
 	// replacePick puts v in place of the whole models.<type> object in the

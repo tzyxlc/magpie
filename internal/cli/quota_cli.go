@@ -15,7 +15,7 @@ import (
 )
 
 const quotaUsage = `usage: magpie quota [<provider>…] [--json]
-       magpie quota reset [<codex account>] [--yes]
+       magpie quota reset [<codex account>] [--card <n>] [--yes]
        magpie quota auto-reset [<codex account>] [week|expiring] [on|off]
        magpie quota auto-reset lead [<minutes or hours, like 30m or 3h>|default]
        magpie quota credits [<codex account>] [on|off]
@@ -31,7 +31,9 @@ const quotaUsage = `usage: magpie quota [<provider>…] [--json]
   shared on the local network, with its key as the API key (Authorization: Bearer or x-api-key)
   A Codex account that holds rate-limit resets says how many; quota reset spends one,
   starting the account's current windows again (the one Codex is signed in to unless
-  named). It can't be undone, so it asks first; --yes doesn't. quota auto-reset on lets
+  named): the one that runs out first, or with --card n the nth to run out (2 the
+  one after the soonest; one that never runs out comes last). It can't be undone, so
+  it asks first, naming the reset; --yes doesn't. quota auto-reset on lets
   the account spend one by itself when its weekly window is used up and no other
   account can take a request, or before a request goes on its credits, one a week
   at most (the five hours running out never does), and spend the one about to expire half an hour before it does, if
@@ -203,18 +205,32 @@ func resetsCell(r *provider.ResetCredits, agent, user string) string {
 	return cell
 }
 
-// quotaResetCmd: magpie quota reset [<codex account>] [--yes] — spends one
-// of the account's rate-limit resets, once the user has said so.
+// quotaResetCmd: magpie quota reset [<codex account>] [--card <n>] [--yes]
+// — spends one of the account's rate-limit resets, once the user has said
+// so: the one that runs out first, or the nth to run out.
 func quotaResetCmd(args []string) error {
-	yes, user := false, ""
-	for _, a := range args {
-		switch a {
+	yes, user, card := false, "", 0
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; a {
 		case "--yes", "-y":
 			yes = true
+		case "--card":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--card takes which reset, 1 for the one that runs out first")
+			}
+			i++
+			n, err := strconv.Atoi(args[i])
+			if err != nil || n < 1 {
+				return fmt.Errorf("--card takes which reset, 1 for the one that runs out first, not %q", args[i])
+			}
+			card = n
 		case "help", "-h", "--help":
 			fmt.Println(quotaUsage)
 			return nil
 		default:
+			if strings.HasPrefix(a, "-") {
+				return fmt.Errorf("magpie quota reset doesn't know %s", a)
+			}
 			if user != "" {
 				return fmt.Errorf("one account at a time: %s or %s", user, a)
 			}
@@ -241,12 +257,30 @@ func quotaResetCmd(args []string) error {
 	if held.Resets == nil && held.Error == "" {
 		return fmt.Errorf("%s holds no rate-limit reset", who)
 	}
+	// the one chosen, by its place among them, soonest first
+	credit := ""
+	var chosen *provider.ResetCard
+	if card > 0 {
+		if held.Resets == nil || len(held.Resets.Each) == 0 || held.Resets.Each[0].ID == "" {
+			return fmt.Errorf("couldn't read %s's resets one by one, so none was used", who)
+		}
+		if card > len(held.Resets.Each) {
+			return fmt.Errorf("%s has %s, not a %s", who, plural(len(held.Resets.Each), "reset"), ordinal(card))
+		}
+		chosen = &held.Resets.Each[card-1]
+		credit = chosen.ID
+	}
 	if !yes {
 		n := "one of its resets"
 		if held.Resets != nil {
 			n = "one of its " + plural(held.Resets.Count, "reset")
 		}
-		if held.Resets != nil && held.Resets.Until != nil {
+		switch {
+		case chosen != nil && chosen.Until != nil:
+			n += " (reset " + strconv.Itoa(card) + ", which runs out " + provider.ResetClock(*chosen.Until, time.Now()) + ")"
+		case chosen != nil:
+			n += " (reset " + strconv.Itoa(card) + ", which never runs out)"
+		case held.Resets != nil && held.Resets.Until != nil:
 			n += " (the one that runs out first, " + provider.ResetClock(*held.Resets.Until, time.Now()) + ")"
 		}
 		fmt.Printf("Spend %s on %s, starting its current windows again? It can't be undone. [y/N] ", n, who)
@@ -255,7 +289,7 @@ func quotaResetCmd(args []string) error {
 			return fmt.Errorf("nothing spent")
 		}
 	}
-	out, err := provider.UseCodexReset(ctx, held.User)
+	out, err := provider.UseCodexResetCard(ctx, held.User, credit)
 	if err != nil {
 		return err
 	}
@@ -264,6 +298,22 @@ func quotaResetCmd(args []string) error {
 	}
 	fmt.Println(green.Render("✓"), who+":", out.Text())
 	return nil
+}
+
+// ordinal is n as "1st", "2nd", "3rd", "4th".
+func ordinal(n int) string {
+	suffix := "th"
+	if n%100 < 11 || n%100 > 13 {
+		switch n % 10 {
+		case 1:
+			suffix = "st"
+		case 2:
+			suffix = "nd"
+		case 3:
+			suffix = "rd"
+		}
+	}
+	return strconv.Itoa(n) + suffix
 }
 
 // quotaAutoResetCmd: magpie quota auto-reset [<codex account>] [week|expiring]
