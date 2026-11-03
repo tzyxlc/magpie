@@ -14,15 +14,16 @@
 // keeps the pick (prefsKeep). No click moves the page. English and Chinese, Chromium and
 // WebKit, with the API faked. Search help covers costs for every provider and
 // explains current eligibility without claiming a provider can never search.
-// The help is also checked in Japanese and German, wrapped whole beside the
-// picker at every width (arculongus on Discord: cut with an ellipsis on the
-// desktop, it couldn't be read; settings-lines-wrap.test.cjs).
+// The help is also checked in Japanese and German, whole in the hover card
+// at every width (the owner, 11-02: a row's explanation rests out of sight;
+// before, it wrapped whole beside the picker, arculongus on Discord: cut
+// with an ellipsis on the desktop, it couldn't be read).
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { watchSettingsReads, settingsDrawn, reach } = require("./reader.cjs");
+const { watchSettingsReads, settingsDrawn, reach, pickItem } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const choices = [
@@ -50,22 +51,22 @@ const words = {
 };
 const helpWords = {
   en: {
-    help: "When a model can't search the web directly, the selected provider searches for it and returns the results. Searches may use the service's quota or incur charges; if the provider magpie picks fails, it tries other available sources, but a provider you select here is never replaced by another provider, only by your Search APIs.",
+    help: "When a model can't search the web directly, the selected provider searches for it and returns the results. Searches may use the service's quota or incur charges; if the provider magpie picks fails, it tries other available sources, and a provider you select here gives way to the ones you add after it, in their order, then, when it can't search at all (out of quota or rate-limited), to other available sources, then to your Search APIs.",
     relays: "These relays must be selected manually and are not used for automatic selection or fallback: MyRelay.",
     left: "These providers can't be selected to search for other models with the current configuration: MiniMax, Kimi For Coding. Their models can still get search results through other available search providers or configured search APIs.",
   },
   zh: {
-    help: "当模型无法直接联网搜索时，由所选供应商代为搜索并返回结果。代搜可能消耗所用服务的额度或产生费用；magpie 自动选择的供应商失败时会尝试其他可用来源，但在此手动选中的供应商不会被换成其他供应商，只会改用你配置的搜索 API。",
+    help: "当模型无法直接联网搜索时，由所选供应商代为搜索并返回结果。代搜可能消耗所用服务的额度或产生费用；magpie 自动选择的供应商失败时会尝试其他可用来源，在此手动选中的供应商失败时会按顺序换成你在它后面添加的供应商；若它完全搜不了（额度用完或被限流），再尝试其他可用来源，最后改用你配置的搜索 API。",
     relays: "以下中转服务需手动指定，不参与自动选择或自动回退：MyRelay。",
     left: "以下供应商在当前配置下不可选为代搜供应商：MiniMax, Kimi For Coding。它们的模型仍可通过其他可用的代搜供应商或已配置的搜索 API 获取搜索结果。",
   },
   ja: {
-    help: "モデルが直接ウェブ検索できない場合、選択したプロバイダが代わりに検索し、結果を返します。検索にはサービスの利用枠を消費したり、料金が発生したりする場合があります。magpie が自動で選んだプロバイダが失敗すると他の利用可能な検索元を試しますが、ここで選んだプロバイダが別のプロバイダに置き換えられることはなく、設定済みの検索 API だけが代わりに使われます。",
+    help: "モデルが直接ウェブ検索できない場合、選択したプロバイダが代わりに検索し、結果を返します。検索にはサービスの利用枠を消費したり、料金が発生したりする場合があります。magpie が自動で選んだプロバイダが失敗すると他の利用可能な検索元を試しますが、ここで選んだプロバイダが失敗すると、その後ろに追加したプロバイダをその順番で試し、利用枠切れやレート制限でまったく検索できないときは他の利用可能な検索元も試し、最後に設定済みの検索 API を使います。",
     relays: "次の中継サービスは手動で選択する必要があり、自動選択や自動フォールバックの対象にはなりません：MyRelay。",
     left: "次のプロバイダは現在の設定では他のモデルの検索用に選択できません：MiniMax, Kimi For Coding。これらのモデルも、他の利用可能な検索用プロバイダや設定済みの検索 API を通じて検索結果を取得できます。",
   },
   de: {
-    help: "Wenn ein Modell nicht direkt im Web suchen kann, übernimmt der ausgewählte Anbieter die Suche und liefert die Ergebnisse. Suchen können das Kontingent des Dienstes verbrauchen oder Kosten verursachen. Schlägt der von magpie gewählte Anbieter fehl, versucht magpie andere verfügbare Quellen; ein hier ausgewählter Anbieter wird jedoch nie durch einen anderen Anbieter ersetzt, nur durch Ihre Such-APIs.",
+    help: "Wenn ein Modell nicht direkt im Web suchen kann, übernimmt der ausgewählte Anbieter die Suche und liefert die Ergebnisse. Suchen können das Kontingent des Dienstes verbrauchen oder Kosten verursachen. Schlägt der von magpie gewählte Anbieter fehl, versucht magpie andere verfügbare Quellen; ein hier ausgewählter Anbieter wird zuerst durch die Anbieter ersetzt, die Sie danach hinzufügen, in ihrer Reihenfolge; kann er gar nicht suchen (Kontingent aufgebraucht oder Ratenlimit), dann durch andere verfügbare Quellen und zuletzt durch Ihre Such-APIs.",
     relays: "Diese Relays müssen manuell ausgewählt werden und werden weder automatisch noch als Fallback gewählt: MyRelay.",
     left: "Diese Anbieter können mit der aktuellen Konfiguration nicht für die Suche anderer Modelle ausgewählt werden: MiniMax, Kimi For Coding. Ihre Modelle können weiterhin über andere verfügbare Suchanbieter oder konfigurierte Such-APIs Suchergebnisse erhalten.",
   },
@@ -204,10 +205,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await page.locator("#searchList .row").nth(1).evaluate((e) => e.classList.contains("search-add")), true);
 
       const where = () => page.evaluate(() => [scrollX, scrollY, document.scrollingElement.scrollTop, document.querySelector("main")?.scrollTop ?? 0]);
-      const click = async (loc) => {
-        const b = await loc.boundingBox();
-        await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
-      };
+      const click = (loc) => pickItem(page, loc);
       const before = await where();
 
       // a model of a provider
@@ -358,6 +356,18 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.equal(await row.locator(".searcher-relays").innerText(), h.relays);
           assert.equal(await row.locator(".searcher-left-out").innerText(), h.left);
           assert.equal(await row.locator("button.searcher-pick").innerText(), "Claude Haiku 4.5 · MyRelay");
+          const sub = row.locator(".sub");
+          assert.equal(await sub.getAttribute("class"), "sub", "every setting row's line wraps, with no class of its own to opt in");
+          // the help explains the row: it rests out of sight and the
+          // pointer on the row shows it whole in the card (the owner,
+          // 11-02; settings-hints.test.cjs), the hover above showing it
+          if (await sub.evaluate((s) => getComputedStyle(s).getPropertyValue("--hint").trim() === "1")) {
+            const card = page.locator(".set-hint.on");
+            await card.waitFor();
+            assert((await card.innerText()).includes(h.help), "the card has the help");
+            assert((await card.innerText()).includes(h.relays), "the card has the relays");
+            continue;
+          }
           const layout = await row.evaluate((r) => {
             const sub = r.querySelector(".sub");
             const b = r.querySelector("button.searcher-pick").getBoundingClientRect();
@@ -370,8 +380,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
                 (s.right <= b.left + 1 || s.bottom <= b.top + 1) };
           });
           assert(layout.clipped <= 1 && layout.fits, JSON.stringify(layout));
-          const sub = row.locator(".sub");
-          assert.equal(await sub.getAttribute("class"), "sub", "every setting row's line wraps, with no class of its own to opt in");
           assert.equal(layout.whiteSpace, "normal", "the help wraps");
           assert(layout.overflow <= 1, JSON.stringify(layout));
           if (process.env.ARTIFACT_DIR) {

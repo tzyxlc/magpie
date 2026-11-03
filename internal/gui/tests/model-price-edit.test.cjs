@@ -27,6 +27,8 @@ function serve(lang, posts) {
     // billed by the hour (treeMan on Discord): the list price is off-peak
     { id: "model-5", name: "Model 5", on: true, efforts: [], images: false, list: { ...list, peak: "deepseek" } },
     { id: "model-6", name: "Model 6", on: true, efforts: [], images: false, list: { ...list, peak: "weekdays" } },
+    // Ollama Cloud's: its own hours, 12:00 to 18:00 UTC (hayden4608 on Discord)
+    { id: "model-7", name: "Model 7", on: true, efforts: [], images: false, list: { ...list, peak: "ollama" } },
   ];
   const provider = { id: "relay", name: "Relay", icon: "generic", chat: "https://relay.example/v1", responses: "", anthropic: "", models, agents: [], key: { set: true, masked: "sk-…1234" }, ready: true };
   const providers = { providers: [provider], presets: [], excluded: [], gateway: { running: true, window: true } };
@@ -91,6 +93,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.match(await row("model-5").locator(".mprice").getAttribute("title"), holiday);
       assert.match(await row("model-6").locator(".mprice").getAttribute("title"), peak);
       assert.doesNotMatch(await row("model-6").locator(".mprice").getAttribute("title"), holiday);
+      const ollama = await row("model-7").locator(".mprice").getAttribute("title");
+      assert.match(ollama, peak);
+      assert.match(ollama, zh ? /周一至周五 UTC 12:00–18:00/ : /from 12:00 to 18:00 UTC, Monday to Friday/);
+      assert.doesNotMatch(ollama, /01:00/);
+      assert.doesNotMatch(ollama, holiday);
+      assert.doesNotMatch(await row("model-6").locator(".mprice").getAttribute("title"), /12:00/);
 
       // a part typed, the others the list's; Restore default drops a price
       const y = await page.evaluate(() => scrollY);

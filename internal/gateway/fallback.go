@@ -23,13 +23,16 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -563,7 +566,7 @@ func planFallbackGroup(g provider.Group, ms []provider.Member, from provider.Pro
 	at, leftAt, unlistedAt := len(pl.order), len(pl.left), len(pl.unlistedW)
 	var asides []candidate
 	var wAsides []Weighed
-	out := planLevel(g, ms, 0, from, pl, &asides, &wAsides)
+	out := planLevel(g, ms, 0, from, pl, &asides, &wAsides, []provider.Group{g})
 	if sinks(g.Sink, g.Routing) {
 		var order []Weighed
 		out, order = sinkPlanned(out, pl.order[at:])
@@ -598,7 +601,7 @@ func (s *Server) planGroup(g provider.Group, ms []provider.Member, from provider
 	var pl planned
 	var asides []candidate
 	var wAsides []Weighed
-	out := planLevel(g, ms, 0, from, &pl, &asides, &wAsides)
+	out := planLevel(g, ms, 0, from, &pl, &asides, &wAsides, nil)
 	if sinks(g.Sink, g.Routing) {
 		out, pl.order = sinkPlanned(out, pl.order)
 	}
@@ -651,9 +654,27 @@ func innerPatience(m provider.Member) int {
 // planLevel orders the models ms of g, a group depth groups down from the
 // one asked for, adding to pl's order as it goes: those set aside and
 // those unlisted it gathers for planGroup to put last.
-func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.Protocol, pl *planned, asides *[]candidate, wAsides *[]Weighed) []candidate {
+func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.Protocol, pl *planned, asides *[]candidate, wAsides *[]Weighed, hold []provider.Group) []candidate {
 	keys := func(m provider.Member) []candidate {
 		cs, aside, left, barred := perKeyBarred(m.Provider, m.Model, from)
+		// a group the member is reached through that is held to some
+		// accounts (Group.Accounts) holds it to them: one it leaves out
+		// is said on the plan's left, held, as a gateway key's are
+		if by := append(slices.Clip(hold), m.Via...); slices.ContainsFunc(by, func(h provider.Group) bool { return len(h.Accounts) > 0 }) {
+			out := func(l []candidate) []candidate {
+				return slices.DeleteFunc(l, func(c candidate) bool {
+					name := groupHeld(c, by)
+					if name == "" {
+						return false
+					}
+					w := weighed(c, m.Provider, weighing{}, false, from)
+					w.Held, w.HeldBy, w.Via = true, name, m.Groups()
+					pl.left = append(pl.left, w)
+					return true
+				})
+			}
+			cs, aside, left, barred = out(cs), out(aside), out(left), out(barred)
+		}
 		// the effort the member is fixed at goes with each of its keys:
 		// the same model at another effort is another member's
 		for _, l := range [][]candidate{cs, aside, left, barred} {
@@ -711,7 +732,7 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 					j++
 				}
 				var sub planned
-				cs := planLevel(m.Via[depth], ms[i:j], depth+1, from, &sub, asides, wAsides)
+				cs := planLevel(m.Via[depth], ms[i:j], depth+1, from, &sub, asides, wAsides, hold)
 				cs, sub.order = sinkOwn(m.Via[depth], cs, sub.order)
 				pl.left = append(pl.left, sub.left...)
 				pl.capped = append(pl.capped, sub.capped...)
@@ -803,7 +824,7 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 				j++
 			}
 			at := len(pl.order)
-			cs := planLevel(m.Via[depth], ms[i:j], depth+1, from, pl, asides, wAsides)
+			cs := planLevel(m.Via[depth], ms[i:j], depth+1, from, pl, asides, wAsides, hold)
 			var order []Weighed
 			cs, order = sinkOwn(m.Via[depth], cs, pl.order[at:])
 			pl.order = append(pl.order[:at], order...)
@@ -1081,26 +1102,59 @@ func asideOf(cs []candidate, q provider.Provider, fallback bool, from provider.P
 	return out
 }
 
-// restLast moves those resting after a recent failure behind the rest.
+// restLast moves those resting after a recent failure behind the rest,
+// and a Codex account set to spend its credits last that has gone onto
+// them (creditsLast) behind both, those in their own order. Ahead of the
+// resting, a model its plugin says is busier than the user's
+// settings.BusyLoad (busyOf) goes behind the ready ones: it answers, only
+// after a wait in its vendor's queue (axelburks on Discord).
 func restLast(out []candidate, pl planned) ([]candidate, planned) {
 	if len(out) == 1 {
 		if r, ok := restingOf(out[0]); ok {
 			pl.order[0].Rest = &r // tried all the same: there is no other
 		}
+		pl.order[0].CreditsLast = out[0].creditsLast(time.Now())
 		return out, pl
 	}
-	var ready, resting []candidate
-	var wReady, wResting []Weighed
+	now := time.Now()
+	over := settings.Shared().BusyLoad
+	var ready, busy, resting, last []candidate
+	var wReady, wBusy, wResting, wLast []Weighed
 	for i, c := range out {
-		if r, ok := restingOf(c); ok {
+		r, isResting := restingOf(c)
+		if isResting {
 			pl.order[i].Rest = &r
+		}
+		load, isBusy := busyOf(c, over, now)
+		switch {
+		case c.creditsLast(now):
+			pl.order[i].CreditsLast = true
+			last, wLast = append(last, c), append(wLast, pl.order[i])
+		case isResting:
 			resting, wResting = append(resting, c), append(wResting, pl.order[i])
-		} else {
+		case isBusy:
+			pl.order[i].Busy = load
+			busy, wBusy = append(busy, c), append(wBusy, pl.order[i])
+		default:
 			ready, wReady = append(ready, c), append(wReady, pl.order[i])
 		}
 	}
-	pl.order = append(wReady, wResting...)
-	return append(ready, resting...), pl
+	pl.order = append(append(append(wReady, wBusy...), wResting...), wLast...)
+	return append(append(append(ready, busy...), resting...), last...), pl
+}
+
+// busyOf is the load c's plugin last reported for its model, and whether
+// that is over the percent over (settings.BusyLoad; 0 is off). A model
+// with no load reported, or none within plugin.LoadFresh, isn't busy:
+// unknown is never taken for idle nor for busy. The plugin reports it by
+// its own id of the model, so a model the user lists by another is looked
+// up by that (axelburks on Discord).
+func busyOf(c candidate, over int, now time.Time) (float64, bool) {
+	if over <= 0 {
+		return 0, false
+	}
+	load, _, ok := plugin.ModelLoad(c.p.PluginProvider(), c.p.OwnModelID(c.model), now)
+	return load, ok && load > float64(over)
 }
 
 // probeOne keeps, of the candidates resting after a failure, only the one
@@ -1484,12 +1538,25 @@ var unsaidWords = regexp.MustCompile(`(?i)(^|"|\\"|: )invalid request error trac
 // member has tried every API it has a URL for (forwardTranslated), and
 // another member, on another API or another vendor, may serve it (#2670:
 // a relay with a Chat URL alone, refusing tools with reasoning there).
+// A relay's own word that the provider behind it turned the request away
+// (upstreamFailedWords: "sub2api: Upstream request failed", type
+// upstream_error) is the relay's failure, not this seat's and not the
+// request's — the words the Codex compaction already reads (#866, #1511) —
+// and another member may answer (#4632: the group's second member never
+// ran, and every turn died on the first seat).
+// GLM's word for a picture it can't read (zhipuImageRefusal, #4732) is
+// one: another vendor takes the webp as it is.
+// A model's demand for an earlier turn's reasoning the history doesn't
+// have (reasoningBackRefused: Beam's "Missing required parameter:
+// 'messages[1].reasoning_content'", EDwinpzy) is one too: the client's
+// request is whole, and a group of Beam then another model stopped at
+// Beam before.
 // One that also says the account is out of quota or credit (quotaWords,
 // creditWords: "请充值") is that, and rests it (#4095).
 func shapeRefused(status int, body []byte) bool {
 	// the words are matched decoded, too (#1669)
 	body = wordsOf(body)
-	return (status == 400 || status == 422) && (shapeWords.Match(body) || unsaidWords.Match(body) || customToolRefusal.Match(body) || wrongEndpoint(status, body)) &&
+	return (status == 400 || status == 422) && (shapeWords.Match(body) || unsaidWords.Match(body) || customToolRefusal.Match(body) || zhipuImageRefusal.Match(body) || wrongEndpoint(status, body) || upstreamFailedWords.Match(body) || reasoningBackRefused(body)) &&
 		!quotaWords.Match(body) && !creditWords.Match(body) && !unservedWords.Match(body) && !refusedWords.Match(body)
 }
 
@@ -1610,7 +1677,13 @@ func retryable(status int, body []byte) bool {
 		// mycf_711)
 		return true
 	case status == 400, status == 422:
-		return quotaWords.Match(body) || unservedWords.Match(body) || refusedWords.Match(body) || shapeWords.Match(body) || unsaidWords.Match(body) || regionWords.Match(body) || wrongEndpoint(status, body)
+		return quotaWords.Match(body) || unservedWords.Match(body) || refusedWords.Match(body) || shapeWords.Match(body) || unsaidWords.Match(body) || regionWords.Match(body) || zhipuImageRefusal.Match(body) || wrongEndpoint(status, body) ||
+			// a relay's own word that the provider behind it turned the
+			// request away (#4632): another member may answer
+			upstreamFailedWords.Match(body) ||
+			// a model's demand for an earlier turn's reasoning (EDwinpzy):
+			// another member's model may not make it
+			reasoningBackRefused(body)
 	}
 	return false
 }
@@ -1893,6 +1966,40 @@ func matesFirst(left []candidate, c candidate) {
 		}
 	}
 	copy(left, append(mates, others...))
+}
+
+// retellMost is the size, in tokens, of a refused conversation past which
+// another Claude subscription account isn't told it again: each is a new
+// Claude Code that writes the whole of it to that account's cache.
+const retellMost = 100_000
+
+// claudeAccount is whether c is a Claude subscription account, served
+// through Claude Code (serveClaudeSubscription).
+func (c candidate) claudeAccount() bool {
+	return c.p.Account != nil && c.p.Account.Agent == "claude"
+}
+
+// tooBigToRetell is whether a conversation is too big to be told again to
+// another Claude subscription account after one refused it (retellMost),
+// and its size in tokens as estimate counts it.
+func tooBigToRetell(from provider.Protocol, body []byte) (int, bool) {
+	req, err := parse(from, body)
+	if err != nil {
+		return 0, false
+	}
+	n := estimate(req)
+	return n, n >= retellMost
+}
+
+// otherThanClaudeAccounts is left without its Claude subscription accounts.
+func otherThanClaudeAccounts(left []candidate) []candidate {
+	var kept []candidate
+	for _, x := range left {
+		if !x.claudeAccount() {
+			kept = append(kept, x)
+		}
+	}
+	return kept
 }
 
 // matesLast puts last, of the candidates left, the other keys or accounts
@@ -3196,6 +3303,25 @@ var filterReasons = map[string]string{
 // taken for content it reached the agent and the try stood as a success.
 const finishFailed = `the reply ended with finish_reason "error"`
 
+// emptyCompleted is what a 200 Responses stream the vendor ends with a
+// response.completed that named its output empty and its usage zero
+// (#2471, MurmuredVelpro) says of itself, in the failure the hold keeps:
+// the turn was answered with nothing, as a translated reply that said
+// nothing and counted nothing is (repliesCounted, #2086), and the
+// group's next member answers it, while taken for a reply's end it
+// reached the agent as a completed turn and the try stood as a success.
+// One that counted a token stays a reply, as Claude's own empty end_turn
+// does; one that names neither field is taken as it came, a relay's
+// completed carrying neither — the fields said are what is read.
+const emptyCompleted = `the reply completed with nothing in it and counted no tokens`
+
+// outputEmpty tells whether a Responses reply named its output as carrying
+// nothing: an empty list, or null — the field said, not left out.
+func outputEmpty(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	return string(raw) == "null" || string(raw) == "[]"
+}
+
 // refusedNote is what a refusal is noted as: the vendor's own reason.
 func refusedNote(reason string) string {
 	return "safety filter: " + reason
@@ -3322,6 +3448,8 @@ func streamEvent(ev []byte) (kind, status int, msg string) {
 			IncompleteDetails *struct {
 				Reason string `json:"reason"`
 			} `json:"incomplete_details"`
+			Output json.RawMessage `json:"output"`
+			Usage  *rUsage         `json:"usage"`
 		} `json:"response"`
 		Choices *[]struct {
 			Delta        map[string]any `json:"delta"`
@@ -3420,6 +3548,16 @@ func streamEvent(ev []byte) (kind, status int, msg string) {
 				return refusal(r)
 			}
 		}
+	case typ == "response.completed" && v.Response.Status != "incomplete" &&
+		outputEmpty(v.Response.Output) && v.Response.Usage != nil && uncounted(v.Response.Usage.usage()):
+		// completed, and the reply named its output empty and its usage
+		// zero (#2471, MurmuredVelpro): no reply at all, as a translated
+		// one that said nothing and counted nothing is (repliesCounted,
+		// #2086). An event this reaches is one nothing was said before —
+		// the hold lets the first content through and reads no event
+		// beside it — so nothing of the try has reached the agent, and
+		// the failure is still held for the group's next candidate
+		return eventError, streamStatus(emptyCompleted), emptyCompleted
 	case typ == "" && v.Candidates != nil:
 		// a Gemini chunk
 		if r, ok := filterReasons[v.PromptFeedback.BlockReason]; ok {
@@ -3858,9 +3996,13 @@ func streamStatus(msg string) int {
 // (its user, or its id in the routing trace), and pl with them. Nothing
 // else is tried in its place: a caller that names one account asks about
 // that one. The error says why none is left: no such account, one that
-// doesn't list the model, or one resting.
-func pinTo(want string, cands []candidate, pl planned) ([]candidate, planned, int, string) {
-	match := func(w Weighed) bool { return strings.EqualFold(want, w.Who) || want == w.ID }
+// doesn't list the model, or one resting. A name that isn't ASCII comes
+// percent-encoded (pinnedName), and matches as written or decoded.
+func pinTo(raw string, cands []candidate, pl planned) ([]candidate, planned, int, string) {
+	want := pinnedName(raw)
+	match := func(w Weighed) bool {
+		return strings.EqualFold(want, w.Who) || want == w.ID || strings.EqualFold(raw, w.Who) || raw == w.ID
+	}
 	var out []candidate
 	var order []Weighed
 	var rests []string
@@ -3907,6 +4049,21 @@ func pinTo(want string, cands []candidate, pl planned) ([]candidate, planned, in
 		msg += "; its accounts are " + strings.Join(have, ", ")
 	}
 	return nil, pl, http.StatusNotFound, msg
+}
+
+// pinnedName is the account AccountHeader names, raw as the request sent
+// it. A header value is ASCII on the wire, and fetch refuses to send one
+// that isn't, so a user named in other letters (北冥, plugins#615) is sent
+// percent-encoded (encodeURIComponent): it is read back decoded. A value
+// that isn't a valid encoding of UTF-8 is the name as written.
+func pinnedName(raw string) string {
+	if !strings.Contains(raw, "%") {
+		return raw
+	}
+	if d, err := url.PathUnescape(raw); err == nil && utf8.ValidString(d) {
+		return strings.TrimSpace(d)
+	}
+	return raw
 }
 
 // unservedTry says c's try failed as the vendor refusing the model as one

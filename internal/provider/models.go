@@ -136,7 +136,13 @@ func (p Provider) Fetched() (time.Time, bool) {
 // for a built-in, listed by its plugin for a plugin's.
 func (p Provider) Listed() (time.Time, bool) {
 	if p.IsPlugin() {
-		return plugin.ListedAt()
+		// one look at the plugins' list a request, not one a provider
+		type listed struct {
+			at time.Time
+			ok bool
+		}
+		l := heldOf("plugin-listed", func() listed { at, ok := plugin.ListedAt(); return listed{at, ok} })
+		return l.at, l.ok
 	}
 	return p.Fetched()
 }
@@ -212,6 +218,36 @@ func (p Provider) liveAll() ([]catalog.Model, bool) {
 	}
 	l := heldOf("fetched-all:"+p.ID, func() live { ms, ok := catalog.LiveAll(p.ID); return live{ms, ok} })
 	return l.ms, l.ok
+}
+
+// Listed is a provider RefreshLists asked, and how many models it listed.
+type Listed struct {
+	ID     string
+	Models int
+}
+
+// refreshEach is how long RefreshLists waits for each provider's list.
+var refreshEach = 8 * time.Second
+
+// RefreshLists asks every provider that is ready, and not switched off,
+// for its model list, each for at most refreshEach, and answers those that
+// answered, in order: the Refresh of every list (the GUI's, `magpie
+// sync`). One switched off is asked nothing and keeps the list it had
+// (ChangQiu on Discord: Off means no request goes to it).
+func RefreshLists(ctx context.Context) []Listed {
+	var out []Listed
+	for _, p := range All() {
+		if !p.Ready() || p.Off {
+			continue
+		}
+		c, cancel := context.WithTimeout(ctx, refreshEach)
+		ms, err := p.Fetch(c)
+		cancel()
+		if err == nil {
+			out = append(out, Listed{p.ID, len(ms)})
+		}
+	}
+	return out
 }
 
 // Fetch asks the vendor which models it serves and remembers the answer.
@@ -344,6 +380,13 @@ func dropGonePicks(id string, before, now map[string]bool) ([]string, error) {
 				q.Delisted = append(q.Delisted, m)
 			}
 		}
+	}
+	switch {
+	case len(q.Models) > 0 || len(q.Delisted) == 0:
+		q.DelistedAt = time.Time{}
+	case len(dropped) > 0 && q.DelistedAt.IsZero():
+		// the last pick left now: the wait for one starts
+		q.DelistedAt = time.Now()
 	}
 	return dropped, store(f)
 }
@@ -737,6 +780,11 @@ func (p Provider) fetchOne(ctx context.Context) (fetched, error) {
 		if proto == Gemini {
 			if p.Gemini == "" {
 				continue // Factory's, whose list is its sign-in's
+			}
+			if p.AIStudioPair() {
+				// AI Studio's OpenAI-compatible list is its Gemini API's
+				// list, asked once
+				continue
 			}
 			if p.IsOpenCode() {
 				// OpenCode's Gemini models are in the list its other
@@ -1516,9 +1564,22 @@ func (p Provider) keyLists() (*keyLists, bool) {
 func (p Provider) ServesNone() bool { return p.NoModels && len(p.Models) == 0 }
 
 // waitsForPicks is a provider whose every pick its list stopped listing
-// (Delisted, none left in Models): none are served until one comes back,
-// not the vendor's whole list as for a provider nothing was picked of.
-func (p Provider) waitsForPicks() bool { return len(p.Models) == 0 && len(p.Delisted) > 0 }
+// (Delisted, none left in Models) less than pickWait ago: none are served
+// until one comes back, not the vendor's whole list as for a provider
+// nothing was picked of. Past pickWait, or set aside with no time kept,
+// the picks are taken as gone for good and the list is served as if none
+// were picked; they still come back with a list that has them.
+func (p Provider) waitsForPicks() bool {
+	return len(p.Models) == 0 && len(p.Delisted) > 0 && !p.DelistedAt.IsZero() && time.Since(p.DelistedAt) < pickWait
+}
+
+// pickWait is how long a provider whose every pick left its list waits for
+// one to come back. A list short for its plugin's restart has them again
+// within minutes (relistSoon asks again in 5); a model its vendor took off
+// (WorkBuddy AI's deepseek-v4.1-flash) never comes back, and an hour with
+// none of the provider's models served is as long as the user is left
+// without them.
+const pickWait = time.Hour
 
 // Exposed lists the models magpie offers to agents for this provider: the
 // user's picks; else the preset's; else everything, when that is few, the
@@ -1568,11 +1629,14 @@ func (p Provider) ExposedOf(avail []catalog.Model) []catalog.Model {
 		return out
 	}
 	picks := p.Models
-	if _, _, ok := p.live(); ok && p.Account != nil && p.Account.unusable != nil {
+	if _, _, ok := p.live(); ok && p.Account != nil && (p.Account.unusable != nil || p.Account.listedOnly) {
 		// A Copilot account is served what its list offers it, less what
 		// it was refused: a pick its list doesn't have (#371: gpt-6-luna,
 		// not in a Student plan's) or that it was refused is left out;
-		// with none left, as if none were picked.
+		// with none left, as if none were picked. A ChatGPT account's
+		// too: a pick made while its list had gpt-5.5 stayed offered after
+		// the list dropped it, and the backend refused every request for
+		// it (#4772). It comes back when the list has it again.
 		picks = slices.DeleteFunc(slices.Clone(picks), func(id string) bool { _, ok := byID[id]; return !ok })
 	} else if p.Account != nil && p.Account.unusable != nil {
 		// with no list fetched, a pick the account can't be served (a
@@ -1693,9 +1757,12 @@ func (p Provider) PicksOf(avail []catalog.Model) []string {
 // toggles) was served the list as it was then, and never Haiku 5.5 when
 // models.dev listed it (wakaka on Discord, after 9b51428e). A model that
 // was listed and left unpicked stays left out, and so do new ones beside
-// picks that left any out. Picks saved before PickedFrom was kept are taken
-// to have held every model when they hold every one released up to the
-// newest of them, and a model released after it is the new one.
+// picks that left any out. A subscription's picks saved before PickedFrom
+// was kept are taken to have held every model when they hold every one
+// released up to the newest of them, and a model released after it is the
+// new one. A provider of keys has no such rule: its picks without
+// PickedFrom are served as they are (yuancjun: one old model picked of a
+// relay's ten served all ten).
 func (p Provider) withNewlyListed(picks []string, avail []catalog.Model) []string {
 	if len(avail) == 0 {
 		return picks
@@ -1711,6 +1778,14 @@ func (p Provider) withNewlyListed(picks []string, avail []catalog.Model) []strin
 			listed[id] = true
 		}
 		isNew = func(m catalog.Model) bool { return !listed[m.ID] }
+	} else if p.Account == nil {
+		// a provider of keys: which models were listed when the picks were
+		// saved wasn't kept, and "released after the newest pick" read a
+		// pick of one old model as "every model listed since". It served
+		// the whole list, and the next Save wrote it down as the picks.
+		// A subscription keeps the rule: its list is the catalog's, and
+		// Select all is a state its editor offers.
+		return picks
 	} else {
 		newest := ""
 		for _, m := range avail {
@@ -2261,16 +2336,21 @@ func (p Provider) kimiCodeMember() bool {
 }
 
 // kimiCodeAPI is the Kimi API model a Kimi Code model id is, as Kimi
-// Code's docs name it (https://www.kimi.com/code/docs/en/, 2026-10-09):
+// Code's docs name it (https://www.kimi.com/code/docs/en/, 2026-11-01):
 // k3 is K3, k3-256k "K3 256K context version … the same results as K3",
-// kimi-for-coding-highspeed "K2.7 Code HighSpeed". Kimi's API prices both
-// per token (https://platform.kimi.ai/docs/pricing/chat: kimi-k3 $3 in,
-// $15 out, $0.30 cached; kimi-k2.7-code-highspeed $1.90, $8, $0.38).
+// k3.1-pro "K3.1 Pro", k3.1-pro-highspeed "K3.1 Pro Highspeed", and
+// kimi-for-coding-highspeed "K2.7 Code HighSpeed". Kimi's API prices them
+// per token (https://platform.kimi.ai/docs/pricing/chat, as models.dev's
+// moonshotai entry lists them, read 2026-10-31: kimi-k3 $3 in, $15 out,
+// $0.30 cached; kimi-k3.1-pro $2, $10, $0.20; kimi-k3.1-pro-highspeed
+// $4, $20, $0.20; kimi-k2.7-code-highspeed $1.90, $8, $0.38).
 // kimi-for-coding is "K2.8 Preview", which the API doesn't sell, so it has
 // no API price and stays unpriced.
 var kimiCodeAPI = map[string]string{
 	"k3":                        "kimi-k3",
 	"k3-256k":                   "kimi-k3",
+	"k3.1-pro":                  "kimi-k3.1-pro",
+	"k3.1-pro-highspeed":        "kimi-k3.1-pro-highspeed",
 	"kimi-for-coding-highspeed": "kimi-k2.7-code-highspeed",
 }
 
@@ -2597,10 +2677,16 @@ func pricedNames(model string) []string {
 	if model == "codex-auto-review" {
 		out = append(out, "gpt-5.6-luna")
 	}
-	if m := grokWindow.FindStringSubmatch(strings.ToLower(strings.TrimSpace(model))); m != nil {
+	// both patterns name grok-: every other model of every provider's list
+	// went through two regexps on each Providers poll
+	l := strings.ToLower(strings.TrimSpace(model))
+	if !strings.Contains(l, "grok-") {
+		return out
+	}
+	if m := grokWindow.FindStringSubmatch(l); m != nil {
 		out = append(out, m[1])
 	}
-	if m := grokEffort.FindStringSubmatch(strings.ToLower(strings.TrimSpace(model))); m != nil {
+	if m := grokEffort.FindStringSubmatch(l); m != nil {
 		out = append(out, m[1])
 	}
 	return out

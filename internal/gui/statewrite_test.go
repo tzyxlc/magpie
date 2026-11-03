@@ -88,6 +88,9 @@ func TestStateWrittenAsEncoded(t *testing.T) {
 // and for keepState's sum, growing a buffer to its size each time: 68 MB
 // of what twenty polls allocated. Each agent is encoded once now, alone.
 func TestStateWriteGrowsNoBufferItsSize(t *testing.T) {
+	if raceOn {
+		t.Skip("-race: sync.Pool drops what it holds, so allocations are not what a build allocates")
+	}
 	s := bigState()
 	w := &sinkWriter{}
 	writeStateJSON(w, s) // json's encoders, warmed

@@ -49,6 +49,10 @@ type Login struct {
 	// Lapsed says the vendor refused to refresh a saved account's sign-in:
 	// it has to be signed in again before it can be used.
 	Lapsed string `json:"lapsed,omitempty"`
+	// Until is when the account's paid plan ends, as its sign-in says (a
+	// ChatGPT one's chatgpt_subscription_active_until, codexUntil): nil
+	// when it doesn't, or names a time gone by.
+	Until *time.Time `json:"until,omitempty"`
 	// Own is the agent's own sign-in, which magpie only reads: removed, it
 	// is hidden rather than deleted (side_logins.go).
 	Own bool `json:"own,omitempty"`
@@ -732,6 +736,18 @@ func CodexSignInPlan() string {
 
 func init() { codexcat.SignInPlan = CodexSignInPlan }
 
+// CodexSignInWho names the ChatGPT account this machine's Codex is signed
+// in to now and its plan, "" when it isn't: what the backend's model list
+// (CodexLiveList) is the list of. A Pro account lists models a Plus one
+// doesn't (chzbz on X: GPT-6.1 Sol).
+func CodexSignInWho() string {
+	l, ok := liveLogin("codex")
+	if !ok {
+		return ""
+	}
+	return l.User + "\x00" + l.Plan
+}
+
 // codexLoginIn is the ChatGPT account Codex is signed in to in its folder
 // home, as Codex keeps it there (auth.json, or the keychain item named by
 // the folder).
@@ -946,8 +962,19 @@ func (p Provider) SignedOut() bool {
 }
 
 // Logins lists the remembered accounts of an agent ("" for every one),
-// the active one flagged.
+// the active one flagged. A request lists an agent's once: /api/providers
+// asks it of every provider, twice with its account models, and each
+// took logins.json's lock, a file opened across magpies (a seventh of
+// the list's CPU). The caller gets its own copy.
 func Logins(agent string) []Login {
+	return slices.Clone(heldOf("logins\x00"+agent, func() []Login { return loginsNow(agent) }))
+}
+
+// loginsRuns counts the lists Logins made (a test reads it).
+var loginsRuns atomic.Int64
+
+func loginsNow(agent string) []Login {
+	loginsRuns.Add(1)
 	if settings.AccountDiscoveryOff() {
 		return nil
 	}
@@ -1004,9 +1031,13 @@ func Logins(agent string) []Login {
 	loginsMu.Lock()
 	defer loginsMu.Unlock()
 	active := map[string]string{}
+	var liveCodex json.RawMessage
 	for _, a := range loginAgents {
 		if l, ok := liveLogin(a); ok {
 			active[a] = l.User
+			if a == "codex" {
+				liveCodex = l.Auth
+			}
 		}
 	}
 	var out []Login
@@ -1035,6 +1066,19 @@ func Logins(agent string) []Login {
 			Paused: (using || first) && pausedOwn(ls, l.Agent, l.User), first: first}
 		if !using && l.Agent == "codex" {
 			lg.home = l.Home
+		}
+		if l.Agent == "codex" {
+			// from the sign-in Codex holds, where it holds this one: it
+			// refreshes it there, and logins.json's copy may be older
+			auth := l.Auth
+			if using {
+				auth = liveCodex
+			} else if home := codexHeldIn(l); home != "" {
+				if in, ok := codexLoginIn(home); ok {
+					auth = in.Auth
+				}
+			}
+			lg.Until = codexUntil(auth, time.Now())
 		}
 		if l.Agent == "claude" {
 			lg.Lapsed = claudeSignedOut(l)
@@ -1217,6 +1261,10 @@ func switchSavedLogin(agent, user string) (from string, _ error) {
 		mu := claudeDirRun(user)
 		mu.Lock()
 		defer mu.Unlock()
+		// nor while another magpie process runs it there (#4532)
+		if err := waitClaudeRuns(user); err != nil {
+			return "", err
+		}
 	}
 	// not while a saved account is being refreshed: the agent would be
 	// given the refresh token that refresh is spending
@@ -1260,6 +1308,15 @@ func switchSavedLogin(agent, user string) (from string, _ error) {
 	}
 	want := *target
 	if agent == "claude" {
+		// not while Claude Code refreshes its sign-in: the one read below
+		// to keep would be the refresh token that refresh is spending
+		// (#4532). Held till the new sign-in is written, so the refresh
+		// that follows starts from it.
+		release, err := claudeRefreshLocks()
+		if err != nil {
+			return "", err
+		}
+		defer release()
 		// the credentials as Claude Code has them this moment, not as last
 		// looked at: one it refreshed since has a new refresh token and the
 		// old one is dead (0xAncientTwo on X: signed out again and again)
@@ -1310,6 +1367,8 @@ func switchSavedLogin(agent, user string) (from string, _ error) {
 	return from, nil
 }
 
+// putClaudeLogin signs Claude Code in to l. The caller holds Claude Code's
+// refresh locks (claudeRefreshLocks).
 func putClaudeLogin(l savedLogin) error {
 	if claudeSetupToken(l.Auth) != "" {
 		return fmt.Errorf(errClaudeTokenSwitch, l.User)
@@ -1336,6 +1395,13 @@ func putClaudeLogin(l savedLogin) error {
 	if len(l.Profile) == 0 {
 		return nil
 	}
+	// read and written back under the lock Claude Code saves the file
+	// under, or a save of its own between the two is lost
+	release, err := claudeConfigLock()
+	if err != nil {
+		return err
+	}
+	defer release()
 	m, err := readClaudeProfile()
 	if err != nil {
 		if !os.IsNotExist(err) {

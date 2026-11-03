@@ -63,6 +63,30 @@ type message struct {
 	Title    string `json:"title"`
 	Variant  string `json:"variant"`
 	Count    int    `json:"count"`
+	// Loads is a "load" event's models and how busy each is, a percent;
+	// -1 clears one (magpie.load in host.js)
+	Loads map[string]float64 `json:"loads"`
+	// Usage is a "usage" event's request, one the plugin sent its vendor
+	// on its own (magpie.usage in host.js)
+	Usage *OwnCall `json:"usage"`
+}
+
+// OwnCall is a request a plugin sent its vendor on its own, outside any
+// request magpie handed it, as it reported it (magpie.usage in host.js):
+// Devin's cache keepalive ping (plugins#592). Kind says what it was for
+// ("cache_keepalive"), Model is the model's id as magpie handed it to the
+// plugin, Input the prompt's tokens without the cache's, Status the
+// vendor's (0 for none) and Millis how long it took.
+type OwnCall struct {
+	Kind       string `json:"kind"`
+	Model      string `json:"model"`
+	Input      int    `json:"input"`
+	Output     int    `json:"output"`
+	CacheRead  int    `json:"cacheRead"`
+	CacheWrite int    `json:"cacheWrite"`
+	Status     int    `json:"status"`
+	Millis     int64  `json:"ms"`
+	Error      string `json:"error"`
 }
 
 type callState uint8
@@ -94,7 +118,7 @@ type call struct {
 	// the body's reader takes them: the host's reader queues them without
 	// ever waiting on one request's consumer (see push).
 	stream      bool
-	cancellable bool // a gateway request owns asynchronous I/O, without a stream slot
+	cancellable bool // a gateway request or sign-in step owns asynchronous I/O, without a stream slot
 	mu          sync.Mutex
 	queue       []message
 	queued      int           // the queued chunks' decoded bytes
@@ -616,6 +640,20 @@ func OnSignIn(f func(provider, account, said string)) {
 	onSignInMu.Lock()
 	onSignIn = f
 	onSignInMu.Unlock()
+}
+
+var (
+	onUsageMu sync.Mutex
+	onUsage   func(provider, account string, u OwnCall)
+)
+
+// OnUsage registers f to be told of each request a plugin reported it
+// sent on its own (OwnCall): its provider id and the account key it was
+// sent for. f is told in the background.
+func OnUsage(f func(provider, account string, u OwnCall)) {
+	onUsageMu.Lock()
+	onUsage = f
+	onUsageMu.Unlock()
 }
 
 var (
@@ -1178,6 +1216,16 @@ func (h *host) dispatch(m message) {
 				// account's lapse into logins.json (#1935)
 				tell(func() { f(m.Provider, m.Account, m.Said) })
 			}
+		case "load":
+			noteLoads(m.Provider, m.Loads, time.Now())
+		case "usage":
+			onUsageMu.Lock()
+			f := onUsage
+			onUsageMu.Unlock()
+			if f != nil && m.Usage != nil && m.Provider != "" {
+				u := *m.Usage
+				tell(func() { f(m.Provider, m.Account, u) })
+			}
 		case "toast":
 			log.Printf("plugin: %s %s", m.Title, m.Message)
 		case "log":
@@ -1546,6 +1594,11 @@ func (h *host) releaseSlot(c *call) {
 	}
 }
 
+// cancellable are the methods whose work the host ends when their caller
+// gives up: a gateway request's I/O, and a sign-in's steps, so a sign-in
+// cancelled or timed out saves nothing the plugin answers after (#5016).
+var cancellable = map[string]bool{"gatewayRequest": true, "authorize": true, "callback": true, "apiKey": true}
+
 // call asks the host method with params and reads its answer into out.
 func (h *host) call(ctx context.Context, method string, params, out any) error {
 	id, c, err := h.begin(false)
@@ -1553,7 +1606,7 @@ func (h *host) call(ctx context.Context, method string, params, out any) error {
 		return err
 	}
 	c.mu.Lock()
-	c.cancellable = method == "gatewayRequest"
+	c.cancellable = cancellable[method]
 	c.mu.Unlock()
 	if err := h.enqueueCall(ctx, map[string]any{"id": id, "method": method, "params": params}, nil, c); err != nil {
 		c.settle(err)
@@ -1827,6 +1880,20 @@ func Fetch(ctx context.Context, r FetchRequest) (*http.Response, error) {
 // errBodyClosed is what a read after the body was closed gets.
 var errBodyClosed = errors.New("the reply's body was closed")
 
+// bodyIdleWait is how long a reply's body may say nothing — no byte between
+// the last and the next — before its read gives the fetch up: a network that
+// died mid-stream can leave a local proxy's socket open but soundless, and a
+// read waiting on the plugin's next chunk then never ends (a stalled read
+// ends only on a chunk, an answer, a close, a cancelled ctx or the host's
+// death). The wait is between bytes, not the reply's whole length: every
+// chunk resets it, so a stream a slow model feeds goes on however long it
+// talks. Thirty minutes, the silence the gateway keeps a translated
+// reply's client alive through (translatedQuietLongest): a reply that
+// comes in one burst at its end (a model at its highest effort, a relay
+// that buffers) is silent for its whole generation, past 10 minutes, and
+// is not cut; a dead connection's read ends at the same bound.
+var bodyIdleWait = 30 * time.Minute
+
 // headRead waits for the call's reply head, giving back the answer it read on
 // the way: the body has to end with that answer too, error and all.
 func (c *call) headRead(ctx context.Context) (head message, answer *message, err error) {
@@ -1886,6 +1953,13 @@ func (b *body) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil // a read that asks for nothing reads nothing
 	}
+	// the idle watchdog: what waits here with no bytes in hand is ended
+	// bodyIdleWait after the last one came, so a plugin gone silent mid-reply
+	// (its socket half-alive on a dead network, #4934) ends the read instead
+	// of holding it for ever. The wait runs only while this Read is the one
+	// waiting, and every pass through the loop waits on a fresh window.
+	idle := time.NewTimer(bodyIdleWait)
+	defer idle.Stop()
 	for {
 		// the end comes first, every time round: a closed body reads
 		// nothing more, and a cancel is not left behind what is queued
@@ -1946,7 +2020,18 @@ func (b *body) Read(p []byte) (int, error) {
 			return 0, b.ctx.Err()
 		case <-b.h.dead:
 			continue
+		case <-idle.C:
+			b.giveUp()
+			return 0, fmt.Errorf("the plugin sent nothing for %s; that fetch was given up on", bodyIdleWait)
 		}
+		// whatever the wait answered, the silence counts afresh from here
+		if !idle.Stop() {
+			select {
+			case <-idle.C:
+			default:
+			}
+		}
+		idle.Reset(bodyIdleWait)
 	}
 }
 

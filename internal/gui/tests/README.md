@@ -12,6 +12,13 @@ checks that request hooks have no provider badge. `MAGPIE_GATEWAY_ASSETS` select
 an older asset directory for a failing regression comparison; user settings and
 live gateways are never accessed.
 
+`plugin-provider-options.test.cjs` checks the same JSON options editor on a
+provider plugin's Installed row (plugins#592: Devin's keep-alive interval and
+pings): shown when its package suggests options, starting from them; absent
+for a plugin with none and one switched off; Save and a confirmed Clear post
+through the real page, in all five languages, at 980px and 420px, on Chromium
+and WebKit. The API is faked.
+
 `settings-proxy-auth.test.cjs` checks a proxy's optional username and
 password in Settings, in fields of their own for SOCKS5/SOCKS5h, HTTP,
 HTTPS and bare host:port proxies alike, using the real page with isolated
@@ -337,6 +344,14 @@ leaving it off; Save posting each changed one by the plugin's provider id
 before the provider, and none switched back. Chromium and WebKit, 1100 and
 420 wide, every language.
 
+`plugin-option-words.test.cjs` checks a plugin option in the reader's
+language (plugins#590): its `labels`, `descriptions` and `confirms` by the
+window's language, zh-TW falling back to zh and the rest to the plain
+words; and, while a `filtersModels` switch is on as saved, the note under
+the Models field's chips that the list is filtered, inside the editor; off,
+none. A WorkBuddy moved onto its plugin, Chromium and WebKit, 1100 and 420
+wide, every language.
+
 `plugin-move-overflow.test.cjs` checks a Plugins card that offers a
 built-in's accounts: the button is one word beside the name, as Install is
 ("Move", its title saying whose accounts and how many), on one line, and it
@@ -371,6 +386,12 @@ why one didn't load, updates one and removes one. The add sheet's
 "More in Plugins" row (the providers list has no button of its own) and
 "look for a plugin" link lead there. English and Chinese, Chromium and WebKit,
 with the API faked.
+
+`plugin-npm-unknown.test.cjs` checks that a suggested plugin npm said
+nothing of (npm or the dist branch not read in time) offers Install, not
+Coming soon, and that the page asks again and then shows its version,
+while one npm said it doesn't have still reads Coming soon. Every
+language, Chromium and WebKit, wide and narrow, with the API faked.
 
 `plugins-more-discover.test.cjs` checks that the add sheet's "More in
 Plugins" row and its "look for a plugin" link open Plugins on Discover,

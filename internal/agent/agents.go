@@ -220,6 +220,7 @@ func onMachine(home, cfg string) []*Agent {
 		codex(home),
 		gemini(home),
 		agy(home),
+		antigravity(home),
 		opencode(home, cfg),
 		openChamber(home, cfg),
 		mimocode(home, cfg),
@@ -241,6 +242,7 @@ func onMachine(home, cfg string) []*Agent {
 		zooCode(home, cfg),
 		copilotJetBrains(home),
 		air(home, cfg),
+		airIDE(home, cfg),
 		copilot(home),
 		crush(home, cfg),
 		dsh(home),
@@ -273,6 +275,7 @@ func onMachine(home, cfg string) []*Agent {
 		codebuddy(home),
 		pencil(home),
 		openPencil(home, cfg),
+		openBot(home, cfg),
 		newMax(home),
 		raycast(home),
 		kiroCrew(home),
@@ -481,10 +484,14 @@ func ownProvider(native func(p string) []catalog.Model, p string) []Option {
 		ms = codexServed(p)
 	}
 	opts := group(name, options(ms, p+"/"))
-	if ic := providerIcon(p); ic != "" {
-		for i := range opts {
-			opts[i].GroupIcon = ic
-		}
+	ic := providerIcon(p)
+	for i := range opts {
+		opts[i].GroupIcon = ic
+		// asked of the vendor on the agent's own sign-in or key: picked on
+		// a connected agent it takes the agent off magpie, which the
+		// picker says and asks first (maxleebeta: Pi's own OpenCode Go
+		// model turned 「接入」 off, with nothing said)
+		opts[i].Direct = name
 	}
 	return opts
 }
@@ -1345,8 +1352,17 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 		b["apiKey"] = key()
 		return b
 	})
+	// Pi's own: magpie's decision and image models, for codemode
+	// (pi_extension.go); a fork's extensions may not be Pi's
+	extension := func() error { return nil }
+	if id == "pi" {
+		extension = func() error { return piExtensionSynced(dir, modelsPath, at.v1(), key()) }
+	}
 	writeMagpie := func() error {
-		return edit.SetJSON(modelsPath, edit.KV{Path: "providers." + magpieID, Value: block()})
+		if err := edit.SetJSON(modelsPath, edit.KV{Path: "providers." + magpieID, Value: block()}); err != nil {
+			return err
+		}
+		return extension()
 	}
 	// the user's two files as they were before magpie's first write, put
 	// back byte for byte by Disconnect where it leaves them saying the same
@@ -1366,6 +1382,9 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 		ListOnly: true,
 		Sync: func() error {
 			if err := syncJSON(modelsPath, "providers."+magpieID, block); err != nil {
+				return err
+			}
+			if err := extension(); err != nil {
 				return err
 			}
 			// an entry on a model magpie no longer gives Pi names nothing
@@ -1394,6 +1413,9 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 							return err
 						}
 						if err := edit.DelJSON(modelsPath, "providers."+magpieID); err != nil {
+							return err
+						}
+						if err := extension(); err != nil {
 							return err
 						}
 						forget(gone)

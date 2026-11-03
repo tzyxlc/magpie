@@ -73,12 +73,14 @@ window.askResetSheet = function (q) {
     go.classList.add("busy");
     try {
       const out = await api("usage/codex-reset", chosen ? { user: q.user || "", credit: cards[chosen].id } : { user: q.user || "" });
+      // the providers' editor and Settings read the account's windows
+      // and resets on their own, kept a minute: read again, as Usage is
+      // (#1491); asked from the editor, closing goes back to it
+      delete loginUsage.codex;
       closeConfirmAsk();
       status(who + ": " + resetOutcome(out), out.code === "reset" ? "ok" : "err");
-      // the providers' editor reads the account's windows and resets
-      // on its own, kept a minute: read again, as Usage is (#1491)
-      delete loginUsage.codex;
       if (editing && view === "providers") renderProviders();
+      if (window.autoResetOwnPaint && $("#codexAutoResetRow")) autoResetOwnPaint(prefs);
       loadQuotas();
     } catch (err) {
       go.disabled = false;
@@ -90,6 +92,8 @@ window.askResetSheet = function (q) {
   cancel.onclick = cancelAsk;
   bar.append(el("span", "grow"), cancel, go);
   ed.append(bar);
+  // asked from a provider's editor (roamlog on X): Cancel goes back to it
+  if (editing && view === "providers") ed.back = renderProviders;
   confirmAsk = ed;
   openModal(ed);
   $("#modal").classList.add("lib");

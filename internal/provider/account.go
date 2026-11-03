@@ -105,6 +105,11 @@ type Account struct {
 	// is one the account was refused (copilot_refused.go); and on a ZCode
 	// account on the Start Plan: whether it is one only the Coding Plan has.
 	unusable func(model string) bool
+	// listedOnly is set on a ChatGPT account: the backend serves none of
+	// the models its list leaves out ("The 'gpt-5.5' model is not
+	// supported when using Codex with a ChatGPT account", #4772), so a
+	// pick the fetched list doesn't have isn't offered.
+	listedOnly bool
 	// explain adds what the user can do about a refusal the account's
 	// backend answered, "" when there is nothing to add (factory.go).
 	explain func(status int, body []byte) string
@@ -1049,6 +1054,7 @@ func codexAccount(home string) (Provider, bool) {
 	}
 	acct.body = codexBody
 	acct.models = catalog.Codex
+	acct.listedOnly = true
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
 		ms, err := codexModels(ctx, acct.sign)
 		if err != nil {
@@ -1778,11 +1784,14 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 	}
 	copilotSeenMu.Unlock()
 	for _, m := range v.Data {
-		if m.Capabilities.Type != "chat" || copilotInternal.MatchString(m.ID) || m.Vendor == "Experimental" {
+		if m.Capabilities.Type != "chat" || copilotInternal.MatchString(m.ID) {
 			continue
 		}
-		// a model no picker offers is an old snapshot or Copilot's own
-		if !m.Picker && m.Category == "" {
+		// a model no picker offers is an old snapshot or Copilot's own; an
+		// Experimental vendor's is Copilot's own too, unless the picker
+		// offers it (#4343: mai-code-2-flash, an Enterprise account's,
+		// served on /responses)
+		if !m.Picker && (m.Category == "" || m.Vendor == "Experimental") {
 			continue
 		}
 		switch {

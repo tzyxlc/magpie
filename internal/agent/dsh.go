@@ -408,7 +408,7 @@ func dshOver(dir string, items []dshItem) []dshItem {
 			continue
 		}
 		n, err := dshNode(out[i])
-		p, patchErr := dshNode(patch)
+		p, patchErr := dshNodeShared(patch) // only read: its values go into n
 		if err != nil || patchErr != nil {
 			out = append(out, patch)
 			continue
@@ -433,7 +433,7 @@ func dshOver(dir string, items []dshItem) []dshItem {
 func dshConfigIndex(items []dshItem, id string) int {
 	for i := len(items) - 1; i >= 0; i-- {
 		if items[i].id == id {
-			if n, err := dshNode(items[i]); err == nil && yamlKey(n, "config") != nil {
+			if n, err := dshNodeShared(items[i]); err == nil && yamlKey(n, "config") != nil {
 				return i
 			}
 		}
@@ -641,6 +641,44 @@ func dshNode(it dshItem) (*yaml.Node, error) {
 	return doc.Content[0].Content[0], nil
 }
 
+// dshNodeShared is dshNode for a look: the window's 15s drift poll asks
+// each profile's entries for their config several times over (dshCheck:
+// dshHomeHas, dshOver, dshConfigIndex, dshRoutesIn, dshConfig), and a parse
+// each time was 257 MB in 20 polls of a copy of the owner's real ~/.dsh.
+// An entry's text is parsed once and its node shared, so whoever gets it
+// only reads it; a caller changing the node takes dshNode's own copy.
+func dshNodeShared(it dshItem) (*yaml.Node, error) {
+	text := strings.Join(it.lines, "\n")
+	dshNodes.Lock()
+	n, ok := dshNodes.m[text]
+	dshNodes.Unlock()
+	if !ok {
+		var err error
+		if n, err = dshNode(it); err != nil {
+			n = nil
+		}
+		dshNodes.Lock()
+		if dshNodes.m == nil || len(dshNodes.m) >= dshNodesMax {
+			dshNodes.m = map[string]*yaml.Node{}
+		}
+		dshNodes.m[text] = n
+		dshNodes.Unlock()
+	}
+	if n == nil {
+		return nil, fmt.Errorf("the %s entry is not one magpie can edit", it.id)
+	}
+	return n, nil
+}
+
+// dshNodesMax bounds the parsed entries kept: a few profiles' dozens of
+// entries, with room for the old text of ones just changed.
+const dshNodesMax = 512
+
+var dshNodes struct {
+	sync.Mutex
+	m map[string]*yaml.Node
+}
+
 // dshNodeLines writes an entry read with dshNode back as lines.
 func dshNodeLines(n *yaml.Node) ([]string, error) {
 	var buf bytes.Buffer
@@ -698,7 +736,7 @@ func yamlMapping(n *yaml.Node, key string) *yaml.Node {
 // dshConfig reads the scalar fields of an entry's config: dsh writes them
 // as it likes, quoted or not.
 func dshConfig(it dshItem) map[string]string {
-	n, err := dshNode(it)
+	n, err := dshNodeShared(it)
 	if err != nil {
 		return nil
 	}
@@ -720,7 +758,7 @@ func dshRoutesIn(items []dshItem) map[string]*yaml.Node {
 	if i < 0 {
 		return nil
 	}
-	n, err := dshNode(items[i])
+	n, err := dshNodeShared(items[i])
 	if err != nil {
 		return nil
 	}
@@ -2487,12 +2525,14 @@ func dshSyncLegacy(f string, models []catalog.Model, gw string) error {
 // dshFillNewProfiles gives a profile dsh made after magpie set it up — the
 // desktop app's, opened for the first time after the web's was wired —
 // magpie's route, and the model magpie set in the others when it starts on
-// none of the user's: until then it lists dsh's own models alone.
+// none of the user's: until then it lists dsh's own models alone. Where no
+// wired profile starts on magpie's route (the user picked one of dsh's own
+// there), the route alone is given, beside dsh's models (zyh6036 on X).
 func dshFillNewProfiles(files []string, models []catalog.Model, gw string) error {
 	if len(models) == 0 {
 		return nil
 	}
-	model := ""
+	model, wired := "", false
 	var bare []string
 	for _, f := range files {
 		_, items, err := dshRead(f)
@@ -2503,21 +2543,22 @@ func dshFillNewProfiles(files []string, models []catalog.Model, gw string) error
 			bare = append(bare, f)
 			continue
 		}
+		wired = true
 		if i := dshFindLast(items, "agent-default-model"); i >= 0 && model == "" {
 			if c := dshConfig(items[i]); isDshRoute(c["provider"]) {
 				model = c["model"]
 			}
 		}
 	}
-	if model == "" {
-		return nil
+	if !wired {
+		return nil // dsh not set up through magpie: nothing to give
 	}
 	for _, f := range bare {
 		head, items, err := dshRead(f)
 		if err != nil {
 			continue
 		}
-		if i := dshFind(items, "agent-default-model"); i < 0 || dshOurs(items[i]) {
+		if i := dshFind(items, "agent-default-model"); model != "" && (i < 0 || dshOurs(items[i])) {
 			if err := dshSetFile(f, magpieID+"/"+model, true, models, gw); err != nil {
 				return err
 			}
