@@ -389,7 +389,12 @@ function renderUsageLoading() {
   view.setAttribute("aria-busy", "true");
   renderPeriod(true);
   $("#usageCost").replaceChildren(el("span", "skeleton sk-cost"));
-  renderQuotas();
+  // cards drawn already stay as they are: the read of the allowances that
+  // goes with every load (loadQuotas) draws them again once it answers.
+  // Drawn here as well, every card and curve was built twice, the first
+  // time inside the click that opened the page, so its motion stuttered
+  // (_hii11 on Discord)
+  if (!quotas || !$("#subscriptionUsage").hasChildNodes()) renderQuotas();
   const stats = $("#stats");
   stats.classList.remove("empty");
   stats.replaceChildren();
@@ -424,7 +429,7 @@ function costHead(c, note, title) {
 // a request magpie sent a provider by itself to test it (SourceProbe)
 const probeWhy = () => t("magpie sent this itself to test the provider (Test, Detect APIs or a model list), not for an agent. It is not counted in any total.");
 const unpricedCalls = (n) => t(n === 1 ? "{n} call unpriced" : "{n} calls unpriced", { n: ledNum(n) });
-const unpricedCallsWhy = (n) => n ? t(n === 1 ? "{n} call had no known price and is not counted" : "{n} calls had no known price and are not counted", { n }) : t("Estimated using effective model prices, including custom prices");
+const unpricedCallsWhy = (n) => n ? t(n === 1 ? "{n} call had no known price and is not counted" : "{n} calls had no known price and are not counted", { n }) : t("Estimated at effective model prices. A model's price at one provider is set in that provider's Names, prices & levels and counts over its list price");
 // renderCosts redraws whatever on the Usage page shows a cost, once the
 // currency changes — the numbers alone, not the page around them, so a
 // click on the setting never moves anything it isn't showing (#212)
@@ -1157,6 +1162,13 @@ window.openUsageRoute = (route) => {
   ledger = null;
   show("usage");
 };
+// Routing's account list sends its reader to each account's
+// allowances in full: the Overview, its tab not kept as the reader's own
+window.openUsageOverview = () => {
+  if (usageTab === "requests") ledLeave();
+  usageTab = "usage";
+  show("usage");
+};
 // the one request a route from Routing listed gives way to the list as it
 // was before it
 function ledRouteOff() {
@@ -1529,6 +1541,11 @@ const LED_TREND = [...LED_METRICS, ["speed", "Speed"]];
 // the gateway key that made it, "none" for calls with none, offered while
 // the period has a key's calls (#2521)
 const LED_SPLITS = [["model", "Model"], ["modelAt", "Model · provider"], ["provider", "Provider"], ["agent", "Agent"], ["callerKey", "Gateway key"]];
+// a count said short (fmtN: 1.2M, 35K, 12.3 万) with its exact value for a
+// tooltip, nothing when the two read the same (skyhuang1994 on Discord:
+// "看这么长串的数字有点懵逼")
+const exactN = (n) => fmtN(n ||= 0) == String(n) ? "" : ledNum(n);
+const tipOf = (...lines) => lines.filter(Boolean).join("\n");
 // cacheTTLs: a call's cache writes split by how long they are kept, where
 // some were for an hour (Anthropic bills those at 2× input, 5 minutes'
 // at 1.25×); nothing when none were
@@ -1611,10 +1628,10 @@ function renderLedgerDash(l) {
     b.onclick = () => ledShowStatus(ledStatusOf() === to ? "" : to);
     return b;
   };
-  block("Requests", ledNum(l.calls), l.errors
-    ? jumps(jump(t("{n} failed", { n: ledNum(l.errors) }), "failed", t("Show only the failed requests")), " · " + t("{p} succeeded", { p: (100 * (1 - l.errors / l.calls)).toFixed(1) + "%" }))
-    : line(t("none failed")));
-  if (l.retried) strip.lastChild.append(jumps(jump(t("{n} answered on a retry", { n: ledNum(l.retried) }), "retried", t("Show only the requests answered on a retry"))));
+  block("Requests", fmtN(l.calls), l.errors
+    ? jumps(jump(t("{n} failed", { n: fmtN(l.errors) }), "failed", t("Show only the failed requests")), " · " + t("{p} succeeded", { p: (100 * (1 - l.errors / l.calls)).toFixed(1) + "%" }))
+    : line(t("none failed")), "", exactN(l.calls));
+  if (l.retried) strip.lastChild.append(jumps(jump(t("{n} answered on a retry", { n: fmtN(l.retried) }), "retried", t("Show only the requests answered on a retry"))));
   const c = fmtCost(l);
   block("Cost", c ? "≈" + c : "—", line(l.unpriced ? t(l.unpriced === 1 ? "{n} call had no known price and is not counted" : "{n} calls had no known price and are not counted", { n: l.unpriced }) : t("effective prices")), c ? "cost" : "");
   const hit = block("Cache hit rate", rate === null ? "—" : (100 * rate).toFixed(1) + "%", cacheLeftOut(l) ? line(cacheLeftOut(l)) : null, "", t("The share of the prompt read from the cache"));
@@ -1962,6 +1979,24 @@ function ledHeatShow(cell) {
   tip.style.left = left + "px";
   tip.style.top = top + "px";
 }
+// Each follows the other, and the scroll a follow sets off is its own echo,
+// never a move to pass back: WebKit tells it a frame later, and on a phone
+// the finger has moved the table on by then, so the bar's echo wrote the
+// table back a frame, every other frame of a swipe (Pluviophile on
+// Discord: 左右滑动震颤, 粘滞卡顿)
+const ledEcho = new WeakMap();
+function ledFollow(to, from) {
+  const was = to.scrollLeft;
+  if (was === from.scrollLeft) return;
+  to.scrollLeft = from.scrollLeft;
+  // one held where it was (no room yet) tells no scroll
+  if (to.scrollLeft !== was) ledEcho.set(to, to.scrollLeft);
+}
+function ledFollowed(e, other) {
+  const box = e.currentTarget, echo = ledEcho.get(box);
+  ledEcho.delete(box);
+  if (box.scrollLeft !== echo) ledFollow(other(), box);
+}
 // the table's scrollbar, kept in view at the window's foot (#799): as wide
 // as the table can go sideways, and moving it as the table moves it
 function ledHScroll() {
@@ -1970,7 +2005,7 @@ function ledHScroll() {
   bar.hidden = !over;
   if (!over) return;
   bar.firstElementChild.style.width = wrap.scrollWidth - wrap.clientWidth + bar.clientWidth + "px";
-  bar.scrollLeft = wrap.scrollLeft;
+  ledFollow(bar, wrap);
   // a sticky box keeps clear of its scroller's padding, so at bottom 0 it
   // stood the view's bottom padding above the window's foot, the table
   // showing through the strip under it: it goes down over that padding
@@ -1978,8 +2013,8 @@ function ledHScroll() {
   const pad = view ? parseFloat(getComputedStyle(view).paddingBottom) || 0 : 0;
   bar.style.bottom = -pad + "px";
 }
-$("#ledWrap").addEventListener("scroll", () => { const bar = $("#ledHScroll"); if (bar.scrollLeft !== $("#ledWrap").scrollLeft) bar.scrollLeft = $("#ledWrap").scrollLeft; }, { passive: true });
-$("#ledHScroll").addEventListener("scroll", () => { const wrap = $("#ledWrap"); if (wrap.scrollLeft !== $("#ledHScroll").scrollLeft) wrap.scrollLeft = $("#ledHScroll").scrollLeft; }, { passive: true });
+$("#ledWrap").addEventListener("scroll", (e) => ledFollowed(e, () => $("#ledHScroll")), { passive: true });
+$("#ledHScroll").addEventListener("scroll", (e) => ledFollowed(e, () => $("#ledWrap")), { passive: true });
 // a window that changes size redraws the chart at its new width
 // a new width fits the table again, on the next frame, and so do the
 // details' width (--ledw) and the scrollbar: each changes the table's or the
@@ -2028,13 +2063,19 @@ const LED_COLS = [
   ["In", "n"], ["Out", "n"], ["Cache write", "n", true], ["Cache read", "n", true], ["Cost", "n"], ["TTFT", "n", 2, "Time to first token"], ["Duration", "n"], ["Speed", "n"], ["Status"],
 ];
 
+// a window under a second after a wait over four times longer: the reply came
+// whole in a moment after a long silence, and what it was written over isn't
+// seen (pluviophile714 on Discord: gpt-6.1-sol, 392 tokens 0.25 s after an
+// 8.2 s first token, read 1,539 tok/s; usage.HeldWindowMs)
+const ledHeldShort_ = (w, from) => w < 1000 && from > 4 * w;
 // the tokens a reply was seen to write and the ms it took, as
 // usage.DecodeOf and routing/client.js's decodeOf tell them: one that reasoned
 // counts its answer from its first text, its reasoning written before
 // the stream showed any (tony on Discord); null when it tells no speed.
 // A reply held back and let go in a burst at its end tells none (John on
 // Discord): its content came in under a quarter of its window (flow_ms),
-// or its answer at over 20 times the pace its reasoning came before it
+// or its answer at over 20 times the pace its reasoning came before it,
+// or it came in under a second after a wait four times longer (ledHeldShort_)
 const ledDecode = (r) => {
   if (ledFailed_(r) || r.reasoning_hidden && !(r.first_text_ms > 0) || !(r.ttft_ms > 0)) return null;
   const think = r.reasoning > 0, visible = think && !(r.first_text_ms > 0) && r.first_reasoning_ms >= r.ttft_ms && r.flow_ms > 0 && r.reasoning <= r.out;
@@ -2042,6 +2083,7 @@ const ledDecode = (r) => {
   const w = r.ms - from;
   if (!(n > 0 && from > 0 && w >= 100 && n * 1000 <= 10000 * w)) return null;
   if (r.flow_ms > 0 && r.flow_ms * 4 < w) return null;
+  if (ledHeldShort_(w, from)) return null;
   if (think && r.first_text_ms > 0 && n * (r.first_text_ms - r.ttft_ms) > 20 * r.reasoning * w) return null;
   if (ledCodexTurn(r) && (w < LED_CODEX_WINDOW_MS || n < LED_CODEX_BODY)) return null;
   return { n, w };
@@ -2114,6 +2156,7 @@ const ledNoSpeed_ = (r) => {
   const from = visible ? r.first_reasoning_ms : think && r.first_text_ms > 0 ? r.first_text_ms : r.ttft_ms, w = r.ms - from;
   const little = t("Too little came after the first token to time a speed by: {n} tokens in {ms}", { n: ledNum(n), ms: ledTook(Math.max(0, w)) });
   if (w < 100) return little;
+  if (ledHeldShort_(w, from) && !(n * 1000 > 10000 * w || r.flow_ms > 0 && r.flow_ms * 4 < w)) return t("It came in under a second after a wait of {wait}: it may have been written during the wait and let go at once, so how fast it was written isn't seen", { wait: ledTook(from) });
   if (n * 1000 > 10000 * w || r.flow_ms > 0 && r.flow_ms * 4 < w || think && r.first_text_ms > 0 && n * (r.first_text_ms - r.ttft_ms) > 20 * r.reasoning * w) return t("It came in one burst at its end, not as it was written, so how fast it was written isn't seen");
   return little;
 };
@@ -2295,13 +2338,17 @@ function renderLedger() {
   slide(seg, "ledStatus");
   $("#ledExport").disabled = !l.total;
 
-  const sum = [t(l.total === 1 ? "{n} request" : "{n} requests", { n: ledNum(l.total) })];
+  // each count short, and exact in the line's tooltip
+  const sum = [], exact = [];
+  const say = (k, n) => { sum.push(t(k, { n: fmtN(n || 0) })); exact.push(t(k, { n: ledNum(n) })); };
+  say(l.total === 1 ? "{n} request" : "{n} requests", l.total);
   if (l.total) {
-    sum.push(t("{n} in", { n: fmtN(l.input) }), t("{n} out", { n: fmtN(l.output) }), t("{n} cache write", { n: fmtN(l.cache_write) }), t("{n} cache read", { n: fmtN(l.cache_read) }));
-    if (l.errors) sum.push(t("{n} failed", { n: l.errors }));
-    if (l.retried) sum.push(t("{n} answered on a retry", { n: l.retried }));
+    say("{n} in", l.input); say("{n} out", l.output); say("{n} cache write", l.cache_write); say("{n} cache read", l.cache_read);
+    if (l.errors) say("{n} failed", l.errors);
+    if (l.retried) say("{n} answered on a retry", l.retried);
   }
   $("#ledSum").textContent = sum.join(" · ");
+  $("#ledSum").title = sum.join() == exact.join() ? "" : exact.join(" · ");
   // the two sources and their total, in the same block of cells as the totals
   // above them: what magpie carried, what it only read about in the agents'
   // own session files, and the two together. Each is a filter: picking one
@@ -2324,7 +2371,8 @@ function renderLedger() {
       b.type = "button";
       b.setAttribute("aria-pressed", on ? "true" : "false");
       b.title = pick ? t("Show only these requests") : t("Show every request again");
-      const v = el("span", "v", ledNum(calls));
+      const v = el("span", "v", fmtN(calls));
+      if (exactN(calls)) v.title = exactN(calls);
       // the unit, so a bare number isn't read as the tokens below it
       v.append(el("em", "", t(calls === 1 ? "request" : "requests")));
       b.replaceChildren(el("span", "k", t(label)), v,
@@ -2509,13 +2557,13 @@ function renderLedger() {
     td(r.model || "—", "model " + (r.model ? "model-value" : "faint"), r.source === "log" && r.model ? t("Model recorded in the local session log; the outbound HTTP request was not captured.") : r.model);
     td(ledServed(r), "model");
     td(r.effort || "—", r.effort ? "" : "faint");
-    td(ledNum(r.in), "n");
-    td(ledNum(r.out), "n", r.reasoning ? t("{n} reasoning, inside output", { n: ledNum(r.reasoning) }) : "");
+    td(fmtN(r.in || 0), "n", exactN(r.in));
+    td(fmtN(r.out || 0), "n", tipOf(exactN(r.out), r.reasoning ? t("{n} reasoning, inside output", { n: ledNum(r.reasoning) }) : ""));
     // a vendor that counts no cache wrote and read none we know of, not 0 (#3464)
     if (r.cache_unknown) for (let i = 0; i < 2; i++) td("—", "n faint", t("The vendor doesn't count the cache"));
     else {
-      td(ledNum(r.cache_write), "n" + (r.cache_write ? "" : " faint"), cacheTTLs(r, ledNum).replace(/^ · /, ""));
-      td(ledNum(r.cache_read), "n" + (r.cache_read ? "" : " faint"));
+      td(fmtN(r.cache_write || 0), "n" + (r.cache_write ? "" : " faint"), tipOf(exactN(r.cache_write), cacheTTLs(r, ledNum).replace(/^ · /, "")));
+      td(fmtN(r.cache_read || 0), "n" + (r.cache_read ? "" : " faint"), exactN(r.cache_read));
     }
     // what the reply said it cost in its plan's credits (WorkBuddy's
     // usage.credit, #2512), on its own row as on the ranking's line
@@ -2810,6 +2858,9 @@ function renderUsageTab() {
 }
 
 const sessDays = () => SESS_RANGES.find(([id]) => id === sessRange)[2];
+// two answers are the same: with the tags api read them under (readTags in
+// app.js), only when they are one object
+const sameRead = (a, b) => a === b || !(readTags.has(a) && readTags.has(b)) && JSON.stringify(a) === JSON.stringify(b);
 async function loadSessions() {
   const first = !sessions || !sessStats;
   if (first) renderSessionsLoading();
@@ -3201,7 +3252,7 @@ function renderSessions() {
   const active = sessModel ? null : acts.filter((a) => byAgent(a) && byFolder(a)).reduce((n, a) => n + a.seconds, 0);
 
   const c = tot.cost ? fmtCost(tot) : "";
-  const unpricedNote = tot.unpriced ? t("Not counted: {models}, with no known price", { models: sessModelNames([...unpriced]) }) : t("Estimated using effective model prices, including custom prices");
+  const unpricedNote = tot.unpriced ? t("Not counted: {models}, with no known price", { models: sessModelNames([...unpriced]) }) : t("Estimated at effective model prices. A model's price at one provider is set in that provider's Names, prices & levels and counts over its list price");
   // a session's models are counted, not its calls: the agents' files price by model
   const unpricedModels = tot.unpriced ? t(tot.unpriced === 1 ? "{n} model unpriced" : "{n} models unpriced", { n: tot.unpriced }) : "";
   costHead(c, unpricedModels, unpricedNote);

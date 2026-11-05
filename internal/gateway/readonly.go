@@ -31,6 +31,8 @@ var readOnlyRoutes = map[string]bool{
 	"GET /v1/{$}":                     true,
 	"GET /v1/magpie/quotas":           true,
 	"GET /v1/magpie/quotas/history":   true,
+	"GET " + StatuslinePath:           true,
+	"POST " + StatuslinePath:          true,
 	"GET " + provider.RemoteCardsPath: true,
 	"GET /v1/magpie/usage":            true,
 	"GET /v1/magpie/usage/requests":   true,
@@ -44,7 +46,7 @@ var readOnlyRoutes = map[string]bool{
 }
 
 // ReadOnlyCode is the error code a read-only key is refused a route with.
-const ReadOnlyCode = "gateway_key_read_only"
+const ReadOnlyCode = provider.KeyReadOnlyCode
 
 // routeMux is a ServeMux that keeps the patterns it was given.
 type routeMux struct {

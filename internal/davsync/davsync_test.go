@@ -2,7 +2,6 @@ package davsync
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"github.com/yetone/magpie/internal/testenv"
 	"io"
@@ -654,96 +653,6 @@ func TestConfigurePassword(t *testing.T) {
 		if c, _ := Load(); c.Password != tc.want || c.Passphrase != "correct horse" {
 			t.Errorf("%s as %q: password %q, passphrase %q", tc.url, tc.user, c.Password, c.Passphrase)
 		}
-	}
-}
-
-// A plugin's sign-in rides the providers part: a keyed sync signs the other
-// computer in to it, and a keyless one leaves it behind.
-func TestSyncCarriesPluginSignIns(t *testing.T) {
-	fake := &fakeDAV{files: map[string][]byte{}, etags: map[string]string{}, dirs: map[string]bool{"/dav": true}}
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
-	ctx := context.Background()
-	const providerID = "opencode-zen"
-	auth := map[string]any{
-		providerID:           map[string]any{"type": "oauth", "accountId": "me@example.com", "refresh": "r1", "access": "a1"},
-		providerID + "#work": map[string]any{"type": "oauth", "accountId": "work@example.com", "refresh": "r2"},
-	}
-	writeAuth := func(t *testing.T, m map[string]any) {
-		t.Helper()
-		if err := os.MkdirAll(settings.Dir(), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		b, _ := json.MarshalIndent(m, "", "  ")
-		if err := os.WriteFile(plugin.AuthPath(), append(b, '\n'), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, keys := range []bool{true, false} {
-		name := "keyed"
-		if !keys {
-			name = "keyless"
-		}
-		t.Run(name, func(t *testing.T) {
-			fake.files, fake.etags, fake.n = map[string][]byte{}, map[string]string{}, 0
-			cfg := Config{URL: srv.URL + "/dav/", User: "me", Password: "pw", Passphrase: "correct horse", Keys: keys}
-			a, b := newComputer(t), newComputer(t)
-			a.use(t)
-			writeAuth(t, auth)
-			if err := Configure(cfg); err != nil {
-				t.Fatal(err)
-			}
-			if err := Now(ctx); err != nil {
-				t.Fatal(err)
-			}
-
-			b.use(t)
-			if err := Configure(cfg); err != nil {
-				t.Fatal(err)
-			}
-			if err := Now(ctx); err != nil {
-				t.Fatal(err)
-			}
-			got := plugin.Auths(providerID)
-			switch {
-			case keys:
-				if len(got) != 2 {
-					t.Fatalf("a keyed sync brought %d accounts, want 2: %v", len(got), got)
-				}
-				for _, k := range []string{providerID, providerID + "#work"} {
-					want := auth[k].(map[string]any)
-					if got[k] == nil || got[k]["refresh"] != want["refresh"] {
-						t.Errorf("account %q came as %v, want refresh %q", k, got[k], want["refresh"])
-					}
-				}
-			default:
-				if len(got) != 0 {
-					t.Fatalf("a keyless sync brought accounts: %v", got)
-				}
-			}
-			if !keys {
-				return
-			}
-			// an account signed in here after the first upload goes up too:
-			// its bundle is a whole collect, and its marker says the
-			// accounts came with keys, as a sync-merged one's would
-			a.use(t)
-			writeAuth(t, map[string]any{
-				providerID:           auth[providerID],
-				providerID + "#work": auth[providerID+"#work"],
-				providerID + "#new":  map[string]any{"type": "oauth", "accountId": "new@example.com", "refresh": "r3"},
-			})
-			if err := Now(ctx); err != nil {
-				t.Fatal(err)
-			}
-			b.use(t)
-			if err := Now(ctx); err != nil {
-				t.Fatal(err)
-			}
-			if got := plugin.Auths(providerID); len(got) != 3 || got[providerID+"#new"] == nil || got[providerID+"#new"]["refresh"] != "r3" {
-				t.Fatalf("an account signed in after the first upload came as %v", got)
-			}
-		})
 	}
 }
 

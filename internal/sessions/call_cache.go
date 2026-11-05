@@ -57,7 +57,14 @@ const callCacheVersion = "calls-v15"
 // for one agent read every agent's history again, every call shard of a
 // long history (~16,000 files, minutes of CPU) after an update. An agent
 // not named here is at 0, as every shard written before this was.
-var callParseVersions = map[string]int{}
+//
+// cindy 1: a call through magpie's link (provider "magpie-<8 hex>") is
+// the gateway's, and left out (cindyGatewayProvider).
+// codex 1, zcode 1: a fork's copies of its parent's calls are the
+// parent's (codex_fork.go, zcDB.copied).
+// codex 2, zcode 2: only the copies are; a fork's own calls are its own
+// (zcode 1 left out every call of a session holding one copy).
+var callParseVersions = map[string]int{"cindy": 1, "codex": 3, "zcode": 2}
 
 // CallCacheVersion is callCacheVersion and callParseVersions, for a cache
 // of what is made of the calls (usage's requests-v1.bin and heatmap): a

@@ -342,12 +342,45 @@ over each turn. One that can't be had fails the request, saying which
 and why; no Claude Code runs it. With the bytes in, the request is an
 ordinary one with a pasted image (`TestClaudeTUIImageByURL`).
 
-Safeguards are taken: interactive Claude Code reads
-`CLAUDE_CODE_EXTRA_BODY` only as it starts (2.1.316: a later
-`apply_flag_settings` or a rewritten `--settings` file changes nothing it
-sends), so `startRun` puts them in its environment, and a turn whose
-safeguards changed starts a new run told the whole conversation
-(`setSafeguards`). Client cache marks are taken too, but not kept: the
+Safeguards are taken, each turn's in every request (#4804). Interactive
+Claude Code reads `CLAUDE_CODE_EXTRA_BODY` from its own environment as
+it builds each request, and nothing outside it changes that once it runs
+(2.1.316: a later `apply_flag_settings` or a rewritten `--settings` file
+changes nothing it sends). `startRun` puts them in its environment, and
+writes the same extra body to `guard.json` in the run's temp folder,
+named to the helper by `MAGPIE_CLAUDE_GUARD` (`claudetui.GuardEnv`). The
+helper hands it to Claude Code as WSL reads it, and takes it out of the
+environment otherwise. On each `/v1/messages` request whose body is a
+string with a `safeguards` key, `tap.js` reads the file, puts its
+`safeguards` there in place of Claude Code's, and sets
+`CLAUDE_CODE_EXTRA_BODY` in Claude Code's environment to it, so the
+requests after are built with it. A JSON parse and stringify of a
+2.1.316 body is byte for byte the same, so the request is what Claude
+Code sends with that variable. At the first such request it writes
+`guard.json.live`. `setSafeguards` replaces the file (temp file and
+rename) before the turn or tool results go to the run, and the run goes
+on, its cache too: an auto-mode tool loop's classifier context grows by
+a `prior_turn_context` entry each batch, and restarting for that began
+a new run for every tool round, each writing the whole conversation to
+the cache again (3 to 10 times the cost;
+`TestClaudeTUIToolLoopCarriesEachBatchsSafeguards`,
+`TestTapPutsTheGuardFilesSafeguards`). A changed safety beta, or
+safeguards appearing or going, still restarts.
+
+A run with no `.live` file (no tap, a Claude Code not on
+`FetchSession`, or no request yet) can't be given them. Its classifier
+context also carries parts that change on nearly every request, the
+ones Claude Code names as variable and sheds over its 256KB budget:
+`prior_turn_context`, `system_reminders`, `artifacts`,
+`text_provenance`, `shed`, Chrome's tabs, and git's status, remotes and
+error. `safeguardsKept` leaves those out of the comparison (git keeps
+cwd, root, branch and default branch), and such a run whose turn
+differs only there goes on with the context it started with
+(xybio; `TestClaudeTUISafeguardsVaryingPartsKeepTheRun`). The server
+classifier then sees those parts as they were when the run started. A
+rules, permission-mode, auto-mode, folder or branch change
+still restarts. The `-p` run takes every change in place
+(`apply_flag_settings`). Client cache marks are taken too, but not kept: the
 helper pastes the words without their marks, so the run keeps Claude
 Code's own prompt caching (no `DISABLE_PROMPT_CACHING`, no client tail)
 and the reply reports every client mark as dropped
@@ -679,8 +712,16 @@ history to the 1h cache at 2×.
    file of two lines, a user line holding the conversation before that
    reply as below (its images as image blocks, client cache marks taken
    out) and an assistant line holding the reply's words (thinking left
-   out). The run starts with `--resume` on it and is typed only the turns
-   after the reply, as a saved session's run is (the session is
+   out). The user line tells every message before the reply inside
+   `<conversation_history>`, with no `<current_turn>`
+   (`renderClaudePromptAt` with the split at the end): the reply answers
+   the last of them, and the turn to answer is the one typed after it.
+   Before 11-04 the user line was rendered as a first message, so the
+   turn the reply answers was marked `<current_turn>`, "the turn to answer
+   now", and a resumed run answered an old question again or said its
+   tool calls had no results (愛睏柴犬阿茶 on Discord,
+   `TestClaudeTUIReplayMarksNoEarlierTurnCurrent`). The run starts with
+   `--resume` on it and is typed only the turns after the reply, as a saved session's run is (the session is
    discarded if the run doesn't take it). The file goes in the project
    folder of the work folder with its links followed, which is the one
    Claude Code reads (on a Mac `/var` is `/private/var`). Before 11-01
@@ -710,6 +751,13 @@ history to the 1h cache at 2×.
    are the history's, or the history's first and then the turn's
    (`currentTurnOpen`, #1751). Told nothing, the model said a text-only
    turn had an image attached and offered to open the path.
+   When the images are all the turn's, as a tool's seven photos in a
+   first turn (no history to open the notes' owner), `imageNotesNote` ends
+   the turn: the images, tool results' too, are in the message, and the
+   notes are Claude Code's record of where it keeps them. Told nothing,
+   the model took the paths for the images and said it could not see them
+   (a Discord report, v0.1.2862). A turn told to a saved session says the
+   same (`renderClaudeTurn`).
 
 A Claude Code that ends before it answers a control request
 (`cliControl`: `initialize`, the safety context) is reported with its
@@ -732,6 +780,13 @@ protocol's error event: Anthropic's `error`, chat's `error` chunk with no
 came before any failure is a failure too, as a translated reply cut short
 is (`errEndedShort`). `TestClaudeSubscriptionRunExitedMidReplyFails`
 holds it on all three protocols, streamed and not, `-p` and interactive.
+
+A streamed reply whose run is quiet past `bridgeHeardAfter` begins
+without it and is sent the protocol's pings until the run speaks
+(`keepBridgeHeard`, #5043): the replay of a long conversation can take
+minutes before its first word, and Claude Code hung up at 599s and
+started again from the replay, writing it to the cache once more (#3808).
+See [gateway routing](gateway-routing.md) for the keepalive rules.
 
 magpie ends a run (`abort`) by asking Claude Code to end with SIGTERM
 (`proc.Tree.Stop`) and kills its tree only once it has exited or
@@ -795,9 +850,23 @@ before the run is let go and its file removed (`branchAt`, a cut copy as
 in [Tool results another request answers first](#tool-results-another-request-answers-first)),
 and a new interactive run resumes the copy, told only the turn's
 messages. Before, every turn after a suggestion was told whole to a new
-run (bbfatx on X). There is no cut with a client's own cache marks, or for a run with no session or no line;
-then the turn is told whole, as before.
-`TestClaudeInteractiveSideQuestionBranchesBeforeIt` holds it.
+run (bbfatx on X). The interactive mode streams a reply first and tells
+its session lines after, read from the file, so as a suggestion begins
+`lastLine` may be a line before the reply (its tool call) or, in a run's
+first reply, empty. The run also keeps the reply's message id (`lastMsg`
+from `replyBegun`, then `backMsg`, `behindMsg` and the shelf's
+`behindMsg`), and `cutReply` cuts after that reply's last main-thread
+line: by the id alone when no line was heard, waiting up to `cutWait` for
+the reply's lines before it falls back to the line (sleepy_shibe, twice).
+The shelf (`unshelve`, `cutBehind`) takes a session behind a side
+question by either. There is no cut with a client's own cache marks, or
+for a run with no session, or neither a line nor a reply; then the turn
+is told whole, as before.
+`TestClaudeInteractiveSideQuestionBranchesBeforeIt`,
+`TestClaudeInteractiveSideQuestionAfterACallKeepsTheReply`,
+`TestClaudeInteractiveSideQuestionAfterAFirstReplyOfWordsKeepsTheReply`,
+`TestClaudeShelvedSideQuestionAfterAFirstReplyOfWordsKeepsTheReply` and
+`TestClaudeCutReplyWaitsForTheReplysLines` hold it.
 
 A turn after a reply that starts a new run logs why none waited
 (`whyNoRun`, "claude: no run waits for this turn: …"): its run went on
@@ -808,7 +877,12 @@ busy with another request, ended (how long ago, and why: `endWhy`, set by
 conversation. Tool results that find no run waiting add what became of
 the run that made the calls ("the run that made the calls ended …",
 `whyCallsLost`, from `b.lostCalls`, which `removeRun` fills with the calls
-the run waited on and the results it was last handed).
+the run waited on and the results it was last handed). Tool results a
+waiting run can't take (its safeguards can't be set, or it isn't
+waiting on those calls) end it with `abortFor`, and the log says why:
+"tool results process expired: <why>", where it said "process expired"
+alone and the run's end read "magpie ended it" (#4804,
+`TestClaudeTUIToolResultsLogWhyTheRunEnded`).
 
 ## A turn the client gives up on (`letGo`, #780, #1365)
 
@@ -1094,12 +1168,27 @@ client's own prompt named another folder. Under a real Claude Code client,
 
 A run therefore starts in the folder the caller names. `clientWorkDir`
 reads the system prompt and every message that is not the model's, and
-takes the last folder named. It knows four ways of naming it:
+takes the folder the first of them names (in that text, its last line).
+It knows four ways of naming it:
 
 - Claude Code: "Primary working directory: X";
 - Codex: `<cwd>X</cwd>`;
 - OpenCode: "Working directory: X";
 - pi: "Current working directory: X".
+
+The first text counts, not the last, so a conversation keeps one folder.
+Claude Code says a move (`cd`) as a later "# Environment update" message,
+"Primary working directory: /y (was /x)". Taking that one gave a run
+started again for the conversation (its saved session resumed, a branch,
+a replay) another prompt than its first run: `envTurnsNote` names the
+folder, and a run in the caller's own folder has that folder in Claude
+Code's environment and saves its session in that folder's project, so
+`--resume` found nothing. Either way the prefix after Claude Code's own
+part changed and the whole conversation was written to the cache again
+(EricWvi on X: …/frontend, then …/frontend/src, the cache read flipping
+between under 10% and over 90%). The move still reaches the model in the
+conversation, as the caller said it. Not measured: whether a model told
+the first folder in `envTurnsNote` after a move misreads the update.
 
 The folder is taken only when it is an absolute path to a folder on this
 computer. Otherwise, as for a caller elsewhere, a Windows path on a Mac,

@@ -1,20 +1,21 @@
 package backup
 
-// What a backup carries of a sign-in: a plugin's, under the keys policy,
-// and never a built-in subscription's. #880 asked for a subscription's
-// sign-in and was closed as intentional — a subscription is the sign-in of
-// an agent on one machine, so each machine signs in on its own, and a bundle
-// that carried one would sign the agent in on the machine it was put on.
+// What a backup carries by default: never a subscription's sign-in. #880
+// asked for one and was closed as intentional — a subscription is the
+// sign-in of an agent on one machine, so each machine signs in on its own.
+// Carrying them is now a choice the user makes (WithSignIns, Parts.SignIns;
+// qianxunji and curtinp118 on Discord), tested in signins_carry_test.go;
+// nothing here asks for it, so these pin the default.
 //
-// A plugin's sign-in is not that: it belongs to a plugin the user installed
-// in magpie, so a bundle that carries the plugin carries its accounts too,
-// unless it was asked for without keys.
-//
-// The rest is pinned as it was. A subscription the user has moved onto its
+// The policy has two sides. A subscription the user has moved onto its
 // plugin still has a row in providers.json, and that row travels, so the
-// receiving machine offers the subscription. Built-in sign-ins stay behind
-// on both stores, with a typed key as the control: a user-typed key syncs,
-// so the policy is not "nothing credential-shaped syncs".
+// receiving machine offers the subscription. What stays behind is the
+// credential behind the row: the row travels, the credential does not.
+//
+// Both sides are pinned here, on the built-in store (logins.json) and the
+// plugin store (plugin-auth.json), under both credential policies of
+// Collect, with a typed key as the control: a user-typed key syncs, so the
+// policy is not "nothing credential-shaped syncs".
 
 import (
 	"bytes"
@@ -205,24 +206,11 @@ func signInSecrets() []string {
 	}
 }
 
-// builtInSignInSecrets is the credentials only logins.json holds: a
-// built-in subscription's, which no bundle carries.
-func builtInSignInSecrets() []string {
-	return []string{fixtureCodexRefresh, fixtureCodexAccess, fixtureClaudeRefresh}
-}
-
-// pluginSignInSecrets is the credentials plugin-auth.json holds: a
-// plugin's, which a keyed bundle carries and a keyless one leaves behind.
-func pluginSignInSecrets() []string {
-	return []string{fixturePluginRefresh, fixturePluginAccess, fixturePluginSlot, fixturePluginKey}
-}
-
 // TestCollectLeavesSubscriptionSignInsOut is the policy itself: under both
-// credential policies, no built-in sign-in reaches a bundle (a plugin's
-// does under keys alone, TestCollectCarriesPluginSignIns). A guard on the
-// keys=false path alone leaks a keyed backup, and one over the built-in
-// store alone leaks every moved subscription, which is the case #880 was
-// filed about.
+// credential policies, no built-in and no plugin sign-in reaches a bundle.
+// A guard on the keys=false path alone leaks a keyed backup, and one over
+// the built-in store alone leaks every moved subscription, which is the
+// case #880 was filed about.
 func TestCollectLeavesSubscriptionSignInsOut(t *testing.T) {
 	for _, keys := range []bool{false, true} {
 		name := "keyless"
@@ -238,16 +226,9 @@ func TestCollectLeavesSubscriptionSignInsOut(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, secret := range builtInSignInSecrets() {
+			for _, secret := range signInSecrets() {
 				if where := whereSignInIs(t, b, secret); where != "" {
 					t.Errorf("a subscription sign-in reached a %s bundle: %q is in it, in %s", name, secret, where)
-				}
-			}
-			if !keys {
-				for _, secret := range pluginSignInSecrets() {
-					if where := whereSignInIs(t, b, secret); where != "" {
-						t.Errorf("a keyless bundle carried a plugin's sign-in: %q is in it, in %s", secret, where)
-					}
 				}
 			}
 			// The credential stayed behind, not on this machine's store: the
@@ -264,8 +245,8 @@ func TestCollectLeavesSubscriptionSignInsOut(t *testing.T) {
 // TestCollectCarriesTheRowOfAMovedSubscription is the asymmetry, said out
 // loud: a subscription the user moved onto its plugin still has a row in
 // providers.json, and that row travels, so the machine the bundle lands on
-// offers the subscription at all. What stays behind is a built-in's
-// credential; the plugin's own sign-in travels with a keyed bundle.
+// offers the subscription at all. What stays behind is the credential
+// behind the row.
 func TestCollectCarriesTheRowOfAMovedSubscription(t *testing.T) {
 	for _, keys := range []bool{false, true} {
 		name := "keyless"
@@ -309,84 +290,6 @@ func TestCollectCarriesTheRowOfAMovedSubscription(t *testing.T) {
 					before, row.Key, row.Keys, row.BalanceToken)
 			}
 		})
-	}
-}
-
-// TestCollectCarriesPluginSignIns is the other side of the policy: a
-// plugin's sign-in is not a subscription's. It belongs to a plugin the user
-// installed in magpie, so a keyed bundle carries every account of the
-// plugins it carries, under the same key plugin-auth.json keeps it.
-func TestCollectCarriesPluginSignIns(t *testing.T) {
-	home(t)
-	appdir.UseExecutable("")
-	subscriptionMachine(t)
-
-	b, err := Collect(true, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	local := plugin.Auths(movedProviderID)
-	if len(local) == 0 {
-		t.Fatalf("the fixture wrote no account of %q", movedProviderID)
-	}
-	got := map[string]string{}
-	for k, v := range b.SignIns {
-		var a any
-		if err := json.Unmarshal(v, &a); err != nil {
-			t.Fatalf("%q in the bundle doesn't read: %v", k, err)
-		}
-		got[k] = canonical(t, v)
-	}
-	for k, a := range local {
-		want, _ := json.Marshal(a)
-		if got[k] != canonical(t, want) {
-			t.Errorf("the bundle's sign-in for %q is %s, want %s", k, got[k], canonical(t, want))
-		}
-	}
-	// the two accounts of one provider are both there: one under its id and
-	// one under id#slot. The other plugin's account comes too when the
-	// plugins' listing names that plugin; when it isn't known, every
-	// sign-in is taken, so the count is never under the two.
-	if len(got) < 2 {
-		t.Errorf("the bundle carries %d sign-ins, want at least the two of %q: %v", len(got), movedProviderID, slices.Sorted(maps.Keys(got)))
-	}
-}
-
-// TestRestoreAddsPluginSignIns is the receiving end: a keyed bundle's
-// sign-ins are added to plugin-auth.json, and one already there is replaced
-// by the bundle's (a token renewed on the other computer), while an account
-// this computer has and the bundle doesn't is left alone.
-func TestRestoreAddsPluginSignIns(t *testing.T) {
-	home(t)
-	appdir.UseExecutable("")
-	subscriptionMachine(t)
-
-	b, err := Collect(true, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// this computer's own account of the same provider, not the bundle's
-	home(t)
-	appdir.UseExecutable("")
-	if err := os.MkdirAll(settings.Dir(), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	writeJSON(t, plugin.AuthPath(), map[string]map[string]any{
-		movedProviderID + "#mine": {"type": "api", "key": "this-computer-key"},
-		movedProviderID:           {"type": "api", "key": "old-key"},
-	})
-	if _, err := Restore(b, Parts{Providers: true}); err != nil {
-		t.Fatal(err)
-	}
-	now := plugin.Auths(movedProviderID)
-	if now[movedProviderID+"#mine"] == nil {
-		t.Error("restoring took away an account this computer had and the bundle didn't")
-	}
-	if a := now[movedProviderID]; a == nil || a["refresh"] != fixturePluginRefresh {
-		t.Errorf("restoring kept this computer's account where the bundle carried another: %v", now[movedProviderID])
-	}
-	if a := now[movedProviderID+"#work"]; a == nil || a["refresh"] != fixturePluginSlot {
-		t.Errorf("restoring left out the bundle's second account: %v", now[movedProviderID+"#work"])
 	}
 }
 

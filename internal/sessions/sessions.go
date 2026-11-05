@@ -192,6 +192,7 @@ type state struct {
 	// the agent whose file it is, for its parseVersions
 	Agent                 string            `json:"agent,omitempty"`
 	Codex                 *codexUsageState  `json:"-"`
+	codexPath             string            // the rollout read, for its fork's parent
 	Claude                *claudeUsageState `json:"claude,omitempty"`
 	DBRevision            string            `json:"db_revision,omitempty"`
 	Head                  string            `json:"head,omitempty"`
@@ -427,6 +428,9 @@ type fileMore struct {
 	// agy: what conversation_summaries.db says of the conversation
 	agy    *agySummary
 	editor *cursorEditorMeta
+	// loose: a Cursor editor transcript whose chat Cursor's editor keeps
+	// no longer, read from a store that could be read (or none)
+	loose bool
 	// wsl: the WSL distro whose home it is in
 	wsl string
 }
@@ -771,6 +775,10 @@ func distinctPaths(fs []file) []file {
 // Dirs are the folders the sessions are read from: Claude Code's and
 // Codex's, and the other agents' where they keep sessions on this computer.
 func Dirs() []string {
+	// gateway mode reads no folder here (OwnOff)
+	if ownOff() {
+		return nil
+	}
 	out := []string{ClaudeDir()}
 	out = append(out, CodexDirs()...)
 	var named []os.FileInfo
@@ -1116,7 +1124,13 @@ const cacheVersion = 29
 // parseVersions is cacheVersion for one agent's parses, 0 when not listed:
 // raised, the parses of that agent's files kept by an older magpie are read
 // again, and the rest stand.
-var parseVersions = map[string]int{}
+//
+// codex 1, zcode 1: a fork's copies of its parent's usage are the
+// parent's (codex_fork.go, zcDB.copied).
+//
+// codex 2: only a fork's copies are; its own calls after them are its own,
+// whatever their numbers.
+var parseVersions = map[string]int{"codex": 3, "zcode": 1}
 
 type cacheFile struct {
 	Version int    `json:"version"`
@@ -1966,6 +1980,7 @@ func parseWith(f file, old *state, calls *callsRide) *state {
 	s.ContentHash = prefixHash(f.path, f.size)
 	var head func([]byte) bool
 	if f.agent == "codex" {
+		s.codexPath = f.path
 		head = func(b []byte) bool { return codexHead(s, b, f.main) }
 	}
 	line := func(b []byte, _, _ int64) bool {
@@ -2671,15 +2686,25 @@ func findListed(agent, id string) (Session, bool) {
 // agent's own title, else its first prompt. A key with no files, or a
 // session with no title, is left out. Desktop's local metadata can name a
 // session without its CLI transcript. The Routing page uses this too (#1293).
+// A ZCode request names its session without the sess_ prefix its database
+// gives it, so that id names the session too.
 func Titles(keys []string) map[string]string {
 	out := map[string]string{}
 	if len(keys) == 0 {
 		return out
 	}
 	want := make(map[string]bool, len(keys))
+	// alias maps the key a file is grouped under back to the key asked for:
+	// ZCode's request id, without the prefix its database gives it.
+	alias := map[string]string{}
 	var desktopIDs, piDesktopIDs []string
 	for _, k := range keys {
 		want[k] = true
+		if agent, id, ok := strings.Cut(k, ":"); ok && agent == "zcode" && !strings.HasPrefix(id, "sess_") {
+			full := agent + ":sess_" + id
+			want[full] = true
+			alias[full] = k
+		}
 		if id, ok := strings.CutPrefix(k, "claude-desktop:"); ok {
 			desktopIDs = append(desktopIDs, id)
 			continue
@@ -2736,6 +2761,9 @@ func Titles(keys []string) map[string]string {
 				continue
 			}
 			out[k] = s.Title
+			if asked := alias[k]; asked != "" {
+				out[asked] = s.Title
+			}
 		}
 	}
 	return out

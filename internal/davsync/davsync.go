@@ -84,6 +84,11 @@ type Config struct {
 	// Usage is whether this computer shares its usage with the others
 	// syncing to the server, and sees theirs (#542)
 	Usage bool `json:"usage,omitempty"`
+	// SignIns is whether the subscription accounts and the plugins'
+	// sign-ins go too, with their credentials, inside the file sealed with
+	// Passphrase: off unless the user turns it on
+	// (provider.MergeSignIns says how two computers' are merged).
+	SignIns bool `json:"signIns,omitempty"`
 	// Other is the most recently left server, retained for older clients.
 	// Servers holds every inactive kind. Nothing syncs to them.
 	Other *Server `json:"other,omitempty"`
@@ -229,6 +234,11 @@ type state struct {
 	// AgentsHere) as the last sync left them: an agent turned so since is
 	// a change the next sync settles, its hashes made as before it.
 	Here []string `json:"here,omitempty"`
+	// SignIns is the sign-ins (id → hash) the last sync left both on the
+	// server and here: one gone from a side since was removed there. Nil
+	// when not known (never synced with them, or a blind write went
+	// over), when none is taken for removed.
+	SignIns map[string]string `json:"signIns"`
 }
 
 // blind is a write the server didn't check: the file it wrote (Sum), and
@@ -481,6 +491,7 @@ type View struct {
 	Branch        string `json:"branch,omitempty"`
 	Library       bool   `json:"library"`
 	Usage         bool   `json:"usage,omitempty"`
+	SignIns       bool   `json:"signIns,omitempty"`
 	// UsageError is why usage couldn't be shared the last time it was tried
 	UsageError string    `json:"usageError,omitempty"`
 	Last       time.Time `json:"last,omitzero"`
@@ -545,7 +556,7 @@ func Status() View {
 			}
 		}
 	}
-	v.Usage = c.Usage
+	v.Usage, v.SignIns = c.Usage, c.SignIns
 	if c.Agents {
 		v.Own = ownFields(st)
 	}
@@ -812,6 +823,11 @@ func collect(c Config) (backup.Bundle, error) {
 	if !c.library() {
 		b.Library = nil
 	}
+	if err == nil && c.SignIns {
+		if serr := backup.WithSignIns(&b); serr != nil {
+			return b, fmt.Errorf("the sign-ins couldn't be read: %w", serr)
+		}
+	}
 	return b, err
 }
 
@@ -829,7 +845,7 @@ func hashes(b backup.Bundle) map[string]string {
 	}
 	ps := slices.Clone(b.Providers)
 	for i := range ps { // this computer's own: kept by Mirror, never synced
-		ps[i].KeepLogin, ps[i].KeepLoginAs, ps[i].SwitchOnly = false, "", false
+		ps[i].KeepLogin, ps[i].KeepLoginAs, ps[i].SwitchOnly, ps[i].RestartApp = false, "", false, false
 	}
 	providers := []any{ps, b.Icons, b.Groups}
 	if b.Searches != nil && len(*b.Searches) > 0 { // as before them, without one
@@ -844,22 +860,28 @@ func hashes(b backup.Bundle) map[string]string {
 	if b.Plugins != nil && len(*b.Plugins) > 0 { // as before them, without one
 		providers = append(providers, map[string][]plugin.Entry{"plugins": *b.Plugins})
 	}
-	if len(b.SignIns) > 0 { // as before them, without one
-		providers = append(providers, map[string]map[string]json.RawMessage{"signIns": b.SignIns})
-	}
 	lib := b.Library
 	if lib != nil && lib.Subagents != nil && len(*lib.Subagents) == 0 { // as before them, without one
 		c := *lib
 		c.Subagents = nil
 		lib = &c
 	}
-	return map[string]string{
+	if lib != nil && lib.Hooks != nil && len(*lib.Hooks) == 0 { // as before them, without one
+		c := *lib
+		c.Hooks = nil
+		lib = &c
+	}
+	out := map[string]string{
 		"providers": h(providers),
 		"settings":  settingsHash,
 		"profiles":  h(orEmpty(b.Profiles)),
 		"agents":    h(orEmpty(b.Agents)),
 		"library":   h(lib),
 	}
+	if b.SignIns != nil { // as before them, without them
+		out["signins"] = h(b.SignIns.Hashes())
+	}
+	return out
 }
 
 func orEmpty[V any](m map[string]V) map[string]V {
@@ -922,17 +944,6 @@ func take(to *backup.Bundle, from backup.Bundle, part string) {
 		}
 		to.Providers, to.Icons, to.Groups, to.Searches, to.Order, to.GroupOrder = ps, from.Icons, from.Groups, searches, from.Order, from.GroupOrder
 		to.Plugins = from.Plugins
-		// the plugins' sign-ins follow the providers' credentials: a keyed
-		// uploader's accounts replace the server's, removals with them; one
-		// sent without keys leaves the server's, as it leaves providers'
-		// keys. A magpie before them sends no marker, and takes none away.
-		switch {
-		case from.SignInsKeys == nil: // older than them: the server's stay
-		case *from.SignInsKeys:
-			to.SignIns = from.SignIns
-		default:
-			to.SignIns = plugin.SignInsServed(to.SignIns, pluginEntries(from.Plugins))
-		}
 		to.ProvidersKeys = backup.Flag(keys || (to.ProvidersKeys != nil && *to.ProvidersKeys))
 		to.Keys = to.Keys || keys // the whole-bundle bit follows it, for a magpie that reads no per-part ones: it keeps the server's keys on its own upload then
 	case "settings":
@@ -974,18 +985,7 @@ func take(to *backup.Bundle, from backup.Bundle, part string) {
 		to.Library = lib
 		to.LibraryKeys = backup.Flag(keys || (to.LibraryKeys != nil && *to.LibraryKeys))
 	}
-	// the sign-ins go with the providers': their marker says whether the
-	// accounts' credentials came, for a reader that keeps them as they are
-	to.SignInsKeys = backup.Flag(to.ProvidersKeys != nil && *to.ProvidersKeys)
 	to.Version = backup.BundleVersion // the merged bundle is a sync one, whatever the server's file was
-}
-
-// pluginEntries is a bundle's plugins, nil when it has none.
-func pluginEntries(es *[]plugin.Entry) []plugin.Entry {
-	if es == nil {
-		return nil
-	}
-	return *es
 }
 
 // changed is when a part was last changed here, as its files say.
@@ -1048,16 +1048,6 @@ func bring(b backup.Bundle, part string) error {
 				for spec, err := range failed {
 					log.Printf("sync: plugin %s: %s", spec, err)
 				}
-			}
-		}
-		// the plugins' sign-ins, after the plugins they belong to are in;
-		// one that can't be kept is said, not a failed sync
-		if len(b.SignIns) > 0 {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			err := plugin.KeepSignIns(ctx, b.SignIns)
-			cancel()
-			if err != nil {
-				log.Printf("sync: the plugins' sign-ins: %s", err)
 			}
 		}
 		if b.Searches == nil { // from a magpie before them: the ones here stay
@@ -1134,6 +1124,7 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 	if b := st.Blind; b != nil {
 		if !unchanged && sum(data) != b.Sum {
 			st.Remote, st.Local = b.Remote, b.Local
+			st.SignIns = nil // what went up may be gone: nothing is taken for removed
 		}
 		st.Blind = nil
 	}
@@ -1203,6 +1194,10 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 		}
 		st.Own, st.Here = after, kept
 		st.Local = hashesOwn(local, afterW)
+		st.SignIns = nil
+		if c.SignIns {
+			st.SignIns = local.SignIns.Hashes()
+		}
 		return nil
 	}
 	if sum(data) == st.Sum && maps.Equal(L, st.Local) && !follow && !moved {
@@ -1362,9 +1357,28 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 			return err
 		}
 	}
+	// the sign-ins, when they go: merged one by one, the later renewed of
+	// each account staying, and what came from the server put in here
+	// without writing over what changed here meanwhile
+	var shared map[string]string
+	if c.SignIns {
+		var plan provider.SignInPlan
+		merged.SignIns, plan, shared = provider.MergeSignIns(local.SignIns, remote.SignIns, st.SignIns)
+		if !plan.Empty() {
+			if _, err := provider.ApplySignIns(plan); err != nil {
+				return fmt.Errorf("bringing in the sign-ins: %w", err)
+			}
+			if local, err = collect(c); err != nil {
+				return err
+			}
+		}
+	}
 	now := hashesOwn(local, afterW)
 	M, pending := hashesOwn(merged, afterW), map[string]string{}
-	for _, p := range Parts {
+	for _, p := range append(slices.Clone(Parts), "signins") {
+		if _, ok := now[p]; !ok && p == "signins" {
+			continue
+		}
 		pending[p] = now[p]
 		if M[p] != R[p] && st.Local != nil {
 			pending[p] = st.Local[p]
@@ -1384,5 +1398,23 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 		}
 	}
 	st.Local = now
+	st.SignIns = nil
+	if c.SignIns {
+		st.SignIns = bothSides(shared, local.SignIns.Hashes())
+	}
 	return nil
+}
+
+// bothSides is the sign-ins on the server (shared) that are here too, as
+// the server has them: one the server has that wasn't put in here (more
+// than one account here could be it, the agent's own here) isn't taken
+// for removed here at the next sync.
+func bothSides(shared, here map[string]string) map[string]string {
+	out := map[string]string{}
+	for id, h := range shared {
+		if _, ok := here[id]; ok {
+			out[id] = h
+		}
+	}
+	return out
 }
